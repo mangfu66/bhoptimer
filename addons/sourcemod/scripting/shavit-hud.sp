@@ -75,6 +75,7 @@ bool gB_Zones = false;
 bool gB_Sounds = false;
 bool gB_Rankings = false;
 bool gB_DynamicChannels = false;
+bool gB_WR = false; // 新增：检查 shavit-wr 是否存在
 
 // cache
 int gI_Cycle = 0;
@@ -105,7 +106,7 @@ bool gB_AlternateCenterKeys[MAXPLAYERS+1]; // use for css linux gamers
 Handle gH_HUDTopleft = null;
 Handle gH_HUDCenter = null;
 
-// plugin cvars
+// plugin convars
 Convar gCV_GradientStepSize = null;
 Convar gCV_TicksPerUpdate = null;
 Convar gCV_SpectatorList = null;
@@ -178,6 +179,7 @@ public void OnPluginStart()
 	gB_Sounds = LibraryExists("shavit-sounds");
 	gB_Rankings = LibraryExists("shavit-rankings");
 	gB_DynamicChannels = LibraryExists("DynamicChannels");
+	gB_WR = LibraryExists("shavit-wr"); // 检查排名插件
 
 	// HUD handle
 	gH_HUDTopleft = CreateHudSynchronizer();
@@ -321,6 +323,10 @@ public void OnLibraryAdded(const char[] name)
 	{
 		gB_DynamicChannels = true;
 	}
+	else if(StrEqual(name, "shavit-wr"))
+	{
+		gB_WR = true;
+	}
 }
 
 public void OnLibraryRemoved(const char[] name)
@@ -344,6 +350,10 @@ public void OnLibraryRemoved(const char[] name)
 	else if(StrEqual(name, "DynamicChannels"))
 	{
 		gB_DynamicChannels = false;
+	}
+	else if(StrEqual(name, "shavit-wr"))
+	{
+		gB_WR = false;
 	}
 }
 
@@ -600,7 +610,7 @@ void Frame_UpdateTopLeftHUD(int serial)
 {
 	int client = GetClientFromSerial(serial);
 
-	if (client)
+	if (client && IsClientInGame(client))
 	{
 		UpdateTopLeftHUD(client, false);
 	}
@@ -1209,19 +1219,19 @@ void AddHUDLine(char[] buffer, int maxlen, const char[] line, int& lines)
 	}
 }
 
-void GetRGB(int color, color_t arr)
+stock void GetRGB(int color, color_t arr)
 {
 	arr.r = ((color >> 16) & 0xFF);
 	arr.g = ((color >> 8) & 0xFF);
 	arr.b = (color & 0xFF);
 }
 
-int GetHex(color_t color)
+stock int GetHex(color_t color)
 {
 	return (((color.r & 0xFF) << 16) + ((color.g & 0xFF) << 8) + (color.b & 0xFF));
 }
 
-int GetGradient(int start, int end, int steps)
+stock int GetGradient(int start, int end, int steps)
 {
 	color_t aColorStart;
 	GetRGB(start, aColorStart);
@@ -1248,6 +1258,7 @@ public void Shavit_OnEnterZone(int client, int type, int track, int id, int enti
 
 int AddHUDToBuffer_Source2013(int client, huddata_t data, char[] buffer, int maxlen)
 {
+	// 保持 Source 2013 (CSS/TF2) 逻辑不变
 	int iLines = 0;
 	char sLine[128];
 	int target = GetSpectatorTarget(client, client);
@@ -1507,13 +1518,16 @@ int AddHUDToBuffer_Source2013(int client, huddata_t data, char[] buffer, int max
 	return iLines;
 }
 
+// 4-Line Custom Layout for CS:GO
 int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 {
 	int iLines = 0;
 	char sLine[128];
+	
+	// 使用 size='12' 字体
+	StrCat(buffer, maxlen, "<font size='12'><pre>");
 
-	StrCat(buffer, maxlen, "<span class='fontSize-l'>");
-
+	// 调试信息 (如果开启)
 	if (gI_HUDSettings[client] & HUD_DEBUGTARGETNAME)
 	{
 		char targetname[64], classname[64];
@@ -1521,7 +1535,6 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		GetEntityClassname(data.iTarget, classname, sizeof(classname));
 
 		char speedmod[33];
-
 		if (IsValidClient(data.iTarget) && !IsFakeClient(data.iTarget))
 		{
 			timer_snapshot_t snapshot;
@@ -1533,208 +1546,220 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 	}
 
-	if(data.bReplay)
+	// 区域 HUD (Start/End Zone)
+	if (data.iZoneHUD != ZoneHUD_None && (gI_HUDSettings[client] & HUD_ZONEHUD))
 	{
-		StrCat(buffer, maxlen, "<pre>");
-
-		if(data.iStyle != -1 && Shavit_GetReplayStatus(data.iTarget) != Replay_Idle && Shavit_GetReplayCacheFrameCount(data.iTarget) > 0)
-		{
-			char sPlayerName[MAX_NAME_LENGTH];
-			Shavit_GetReplayCacheName(data.iTarget, sPlayerName, sizeof(sPlayerName));
-
-			char sTrack[32];
-
-			if(data.iTrack != Track_Main && (gI_HUD2Settings[client] & HUD2_TRACK) == 0)
-			{
-				GetTrackName(client, data.iTrack, sTrack, 32);
-				Format(sTrack, 32, "(%s) ", sTrack);
-			}
-
-			FormatEx(sLine, 128, "<u><span color='#%s'>%s %s%T</span></u> <span color='#DB88C2'>%s</span>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName, sTrack, "ReplayText", client, sPlayerName);
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-
-			if((gI_HUD2Settings[client] & HUD2_TIME) == 0)
-			{
-				char sTime[32];
-				FormatSeconds(data.fTime, sTime, 32, false);
-
-				char sWR[32];
-				FormatSeconds(data.fWR, sWR, 32, false);
-
-				FormatEx(sLine, 128, "%s / %s (%.1f％)", sTime, sWR, ((data.fTime / data.fWR) * 100));
-				AddHUDLine(buffer, maxlen, sLine, iLines);
-			}
-
-			if((gI_HUD2Settings[client] & HUD2_SPEED) == 0)
-			{
-				FormatEx(sLine, 128, "%d u/s", data.iSpeed);
-				AddHUDLine(buffer, maxlen, sLine, iLines);
-			}
-		}
-		else
-		{
-			FormatEx(sLine, 128, "%T", "NoReplayData", client);
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-		}
-
-		StrCat(buffer, maxlen, "</pre></span>");
-
+		FormatEx(sLine, sizeof(sLine),
+			"<span color='#%06X'>%T</span>",
+			((gI_Gradient.r << 16) + (gI_Gradient.g << 8) + (gI_Gradient.b)),
+			(data.iZoneHUD == ZoneHUD_Start) ? "HudInStartZoneCSGO" : "HudInEndZoneCSGO",
+			client,
+			data.iSpeed
+		);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		StrCat(buffer, maxlen, "</pre></font>");
 		return iLines;
 	}
 
-	char sFirstThing[32];
+	// 计时器停止时
+	if (data.iTimerStatus == Timer_Stopped && !data.bReplay)
+	{
+		// 显示基本信息
+		// Style Name
+		if (data.iStyle >= 0 && data.iStyle < gI_Styles)
+		{
+			FormatEx(sLine, 128, "<span color='#%s'>%s</span>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
+		}
+		else
+		{
+			FormatEx(sLine, 128, "Unknown Style");
+		}
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		// Map Tier
+		if (gB_Rankings && (gI_HUD2Settings[client] & HUD2_MAPTIER) == 0)
+		{
+			FormatEx(sLine, 128, "%T", "HudZoneTier", client, data.iMapTier);
+			AddHUDLine(buffer, maxlen, sLine, iLines);
+		}
+		
+		// Speed
+		FormatEx(sLine, 128, "%d u/s", data.iSpeed);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		StrCat(buffer, maxlen, "</pre></font>");
+		return iLines;
+	}
+	
+	// 处理 Replay Bot (特殊显示)
+	if(data.bReplay)
+	{
+		// [修复] 如果样式为 -1 (Bot空闲/未加载)，直接显示无数据并返回，防止崩溃
+		if (data.iStyle < 0 || data.iStyle >= gI_Styles)
+		{
+			FormatEx(sLine, 128, "No Replay Data");
+			AddHUDLine(buffer, maxlen, sLine, iLines);
+			StrCat(buffer, maxlen, "</pre></font>");
+			return iLines;
+		}
 
+		// 这里可以自定义 Replay 的 HUD，为了保持风格一致，我们尽量模仿下面的格式，但简化数据
+		// Line 1: Time | Speed
+		char sTime[32];
+		FormatSeconds(data.fTime, sTime, 32, false);
+		FormatEx(sLine, 128, "%s   %d u/s", sTime, data.iSpeed);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		// Line 2: Replay Name
+		char sPlayerName[MAX_NAME_LENGTH];
+		Shavit_GetReplayCacheName(data.iTarget, sPlayerName, sizeof(sPlayerName));
+		FormatEx(sLine, 128, "%s", sPlayerName);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		// Line 3: WR Time (Total Length)
+		char sWR[32];
+		FormatSeconds(data.fWR, sWR, 32, false);
+		FormatEx(sLine, 128, "Total: %s (%.1f%%)", sWR, ((data.fTime / data.fWR) * 100));
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		// Line 4: Style
+		FormatEx(sLine, 128, "<span color='#%s'>%s</span> | Replay", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+		
+		StrCat(buffer, maxlen, "</pre></font>");
+		return iLines;
+	}
+
+	// === 第 1 行: 时间 (差值)   [间隔]   速度 (差值) ===
+	
+	// 时间部分
+	char sTime[32], sTimeDiff[64];
+	FormatSeconds(data.fTime, sTime, 32, false);
+	
+	if (data.fClosestReplayTime != -1.0)
+	{
+		float fDifference = data.fTime - data.fClosestReplayTime;
+		char sDiffVal[32];
+		FormatSeconds(fDifference, sDiffVal, 32, false, FloatAbs(fDifference) >= 60.0);
+		
+		// 绿色为快 (-)，红色为慢 (+)
+		int diffColor = (fDifference <= 0.0) ? 0x00FF00 : 0xFF0000;
+		Format(sTimeDiff, sizeof(sTimeDiff), " (<span color='#%06X'>%s%s</span>)", diffColor, (fDifference >= 0.0) ? "+" : "", sDiffVal);
+	}
+	else
+	{
+		sTimeDiff[0] = '\0';
+	}
+	
+	// 速度部分
+	char sVelDiff[64];
+	if (data.fClosestReplayTime != -1.0)
+	{
+		float res = data.fClosestVelocityDifference;
+		// 绿色为快 (+)，红色为慢 (-)
+		int velColor = (res >= 0.0) ? 0x00FF00 : 0xFF0000;
+		Format(sVelDiff, sizeof(sVelDiff), " (<span color='#%06X'>%s%.0f</span>)", velColor, (res >= 0.0) ? "+" : "", res);
+	}
+	else
+	{
+		sVelDiff[0] = '\0';
+	}
+	
+	// 组合第1行
+	FormatEx(sLine, 128, "%s%s     %d u/s%s", sTime, sTimeDiff, data.iSpeed, sVelDiff);
+	AddHUDLine(buffer, maxlen, sLine, iLines);
+	
+	
+	// === 第 2 行: PB: xx.xx (#排名)     WR: xx.xx ===
+	
+	char sPB[32], sWR[32];
+	char sPBRankText[32]; // Buffer for rank text
+	sPBRankText[0] = '\0'; // Init empty
+
+	if (data.fPB > 0.0 && gB_WR)
+	{
+		// 使用 FormatSeconds 格式化 PB
+		FormatSeconds(data.fPB, sPB, sizeof(sPB), true);
+		// Fix: Use PB time for rank, not current time (data.iRank is live rank)
+		int iPBRank = Shavit_GetRankForTime(data.iStyle, data.fPB, data.iTrack);
+		// 保留 (#排名)
+		Format(sPBRankText, sizeof(sPBRankText), " (#%d)", iPBRank);
+	}
+	else
+	{
+		sPB = "N/A";
+		// No PB, so no rank display
+	}
+		
+	if (data.fWR > 0.0)
+		FormatSeconds(data.fWR, sWR, sizeof(sWR), true); // 使用 FormatSeconds 格式化 WR
+	else
+		sWR = "N/A";
+		
+	// 改回空格分隔
+	FormatEx(sLine, 128, "PB: %s%s     WR: %s", sPB, sPBRankText, sWR);
+	AddHUDLine(buffer, maxlen, sLine, iLines);
+	
+	
+	// === 第 3 行: 跳跃: xx   [间隔]   平移: xx (同步) ===
+	
+	char sSync[32];
+	if (data.fSync >= 0.0)
+		Format(sSync, sizeof(sSync), " (%.1f%%)", data.fSync);
+	else
+		sSync[0] = '\0';
+		
+	FormatEx(sLine, 128, "Jumps: %d     Strafes: %d%s", data.iJumps, data.iStrafes, sSync);
+	AddHUDLine(buffer, maxlen, sLine, iLines);
+	
+	
+	// === 第 4 行: 样式名称 | 赛道/难度 #实时排名 ===
+	
+	char sTrackInfo[64];
 	if (data.iTrack == Track_Main)
 	{
 		if (gB_Rankings && (gI_HUD2Settings[client] & HUD2_MAPTIER) == 0)
 		{
-			FormatEx(sFirstThing, sizeof(sFirstThing), "%T", "HudZoneTier", client, data.iMapTier);
+			// 主赛道显示 Tier
+			Format(sTrackInfo, sizeof(sTrackInfo), "T%d", data.iMapTier);
+		}
+		else
+		{
+			sTrackInfo = "Main";
 		}
 	}
 	else
 	{
-		if ((gI_HUD2Settings[client] & HUD2_TRACK) == 0)
+		// Bonus 显示 Bonus 名称
+		GetTrackName(client, data.iTrack, sTrackInfo, sizeof(sTrackInfo));
+	}
+	
+	// Calculate and display live rank
+	// 使用实时排名 (进终点前的排名)
+	if (gB_WR && data.iTimerStatus == Timer_Running)
+	{
+		// 只要在跑图就开始计算实时排名
+		int iLiveRank = Shavit_GetRankForTime(data.iStyle, data.fTime, data.iTrack);
+		// 直接显示 #排名, 用空格隔开
+		if (data.fTime > 0.0)
 		{
-			GetTrackName(client, data.iTrack, sFirstThing, sizeof(sFirstThing));
+			Format(sTrackInfo, sizeof(sTrackInfo), "%s #%d", sTrackInfo, iLiveRank);
 		}
 	}
-
-	StrCat(buffer, maxlen, sFirstThing);
-
-	if ((gI_HUD2Settings[client] & HUD2_STYLE) == 0)
+	
+	// [修复] 增加对 iStyle 的有效性检查
+	if (data.iStyle >= 0 && data.iStyle < gI_Styles)
 	{
-		FormatEx(sLine, 128, "%s<span color='#%s'>%s</span>", (sFirstThing[0]) ? " | " : "", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
-		StrCat(buffer, maxlen, sLine);
-		//AddHUDLine(buffer, maxlen, sLine, iLines);
-	}
-
-	StrCat(buffer, maxlen, "<pre>");
-
-	if (data.iZoneHUD != ZoneHUD_None)
-	{
-		if ((gI_HUDSettings[client] & HUD_ZONEHUD) > 0)
-		{
-			FormatEx(sLine, sizeof(sLine),
-				"<span color='#%06X'>%T</span>",
-				((gI_Gradient.r << 16) + (gI_Gradient.g << 8) + (gI_Gradient.b)),
-				(data.iZoneHUD == ZoneHUD_Start) ? "HudInStartZoneCSGO" : "HudInEndZoneCSGO",
-				client,
-				data.iSpeed
-			);
-
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-		}
-	}
-	else if (data.iTimerStatus == Timer_Stopped)
-	{
-		StrCat(buffer, maxlen, "\n");
+		FormatEx(sLine, 128, "<span color='#%s'>%s</span> | %s", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName, sTrackInfo);
 	}
 	else
 	{
-		if(data.bPractice || data.iTimerStatus == Timer_Paused)
-		{
-			FormatEx(sLine, 128, "%T", (data.iTimerStatus == Timer_Paused)? "HudPaused":"HudPracticeMode", client);
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-		}
-
-		if((gI_HUD2Settings[client] & HUD2_TIME) == 0)
-		{
-			int iColor = 0xFF0000; // red, worse than both pb and wr
-
-			if (data.iTimerStatus == Timer_Paused)
-			{
-				iColor = 0xA9C5E8; // blue sky
-			}
-			else if(data.fTime < data.fWR || data.fWR == 0.0)
-			{
-				iColor = GetGradient(0x00FF00, 0x96172C, RoundToZero((data.fTime / data.fWR) * 100));
-			}
-			else if(data.fPB != 0.0 && data.fTime < data.fPB)
-			{
-				iColor = 0xFFA500; // orange
-			}
-
-			char sTime[32];
-			FormatSeconds(data.fTime, sTime, 32, false);
-
-			char sTimeDiff[32];
-
-			if ((gI_HUD2Settings[client] & HUD2_TIMEDIFFERENCE) == 0 && data.fClosestReplayTime != -1.0)
-			{
-				float fDifference = data.fTime - data.fClosestReplayTime;
-				FormatSeconds(fDifference, sTimeDiff, 32, false, FloatAbs(fDifference) >= 60.0);
-				Format(sTimeDiff, 32, " (%s%s)", (fDifference >= 0.0)? "+":"", sTimeDiff);
-			}
-
-			if((gI_HUD2Settings[client] & HUD2_RANK) == 0)
-			{
-				FormatEx(sLine, 128, "<span color='#%06X'>%s%s</span> (#%d)", iColor, sTime, sTimeDiff, data.iRank);
-			}
-			else
-			{
-				FormatEx(sLine, 128, "<span color='#%06X'>%s%s</span>", iColor, sTime, sTimeDiff);
-			}
-
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-		}
+		FormatEx(sLine, 128, "Unknown Style | %s", sTrackInfo);
 	}
+	AddHUDLine(buffer, maxlen, sLine, iLines);
 
-	if((gI_HUD2Settings[client] & HUD2_SPEED) == 0)
-	{
-		int iColor = 0xA0FFFF;
-
-		if((data.iSpeed - data.iPreviousSpeed) < 0)
-		{
-			iColor = 0xFFC966;
-		}
-
-		char sVelDiff[32];
-
-		if (data.iZoneHUD == ZoneHUD_None && data.iTimerStatus != Timer_Stopped && data.fClosestReplayTime != -1.0 && (gI_HUD2Settings[client] & HUD2_VELOCITYDIFFERENCE) == 0)
-		{
-			float res = data.fClosestVelocityDifference;
-			FormatEx(sVelDiff, sizeof(sVelDiff), " (%s%.0f)", (res >= 0.0) ? "+":"", res);
-		}
-
-		FormatEx(sLine, 128, "<span color='#%06X'>%s%d u/s%s</span>",
-			iColor,
-			((data.iSpeed<10) ? "     " : (data.iSpeed<100 ? "   " : (data.iSpeed<1000 ? " " : ""))),
-			data.iSpeed,
-			sVelDiff
-		);
-
-		AddHUDLine(buffer, maxlen, sLine, iLines);
-	}
-
-	if (/*data.iZoneHUD == ZoneHUD_None &&*/ data.iTimerStatus != Timer_Stopped)
-	{
-		if((gI_HUD2Settings[client] & HUD2_JUMPS) == 0)
-		{
-			char prebuf[32];
-			FormatEx(prebuf, sizeof(prebuf), "%s", ((data.iJumps<10) ? "     " : (data.iJumps<100 ? "   " : (data.iJumps<1000 ? " " : ""))));
-			FormatEx(sLine, 128, "%s%d %T", prebuf, data.iJumps, "HudJumpsText", client);
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-		}
-
-		if((gI_HUD2Settings[client] & HUD2_STRAFE) == 0)
-		{
-			char prebuf[32];
-			FormatEx(prebuf, sizeof(prebuf), "%s", ((data.iStrafes<10) ? "     " : (data.iStrafes<100 ? "   " : (data.iStrafes<1000 ? " " : ""))));
-
-			if((gI_HUD2Settings[client] & HUD2_SYNC) == 0)
-			{
-				FormatEx(sLine, 128, "%s%d %T (%.1f%%)", prebuf, data.iStrafes, "HudStrafeText", client, data.fSync);
-			}
-			else
-			{
-				FormatEx(sLine, 128, "%s%d %T", prebuf, data.iStrafes, "HudStrafeText", client);
-			}
-
-			AddHUDLine(buffer, maxlen, sLine, iLines);
-		}
-	}
-
-	StrCat(buffer, maxlen, "</pre></span>");
+	StrCat(buffer, maxlen, "</pre></font>");
 
 	return iLines;
 }
@@ -1806,10 +1831,35 @@ void UpdateMainHUD(int client)
 	huddata.fTime = (bReplay)? fReplayTime:Shavit_GetClientTime(target);
 	huddata.iJumps = (bReplay)? 0:Shavit_GetClientJumps(target);
 	huddata.iStrafes = (bReplay)? 0:Shavit_GetStrafeCount(target);
-	huddata.iRank = (bReplay)? 0:Shavit_GetRankForTime(huddata.iStyle, huddata.fTime, huddata.iTrack);
+	
+	// FIX: Don't call Shavit_GetRankForTime if shavit-wr is not loaded or data is invalid.
+	// Also only call it if we actually have a time to rank.
+	if (bReplay || !gB_WR || huddata.fTime <= 0.0)
+	{
+		huddata.iRank = 0;
+	}
+	else
+	{
+		huddata.iRank = Shavit_GetRankForTime(huddata.iStyle, huddata.fTime, huddata.iTrack);
+	}
+	
 	huddata.fSync = (bReplay)? 0.0:Shavit_GetSync(target);
 	huddata.fPB = (bReplay)? 0.0:Shavit_GetClientPB(target, huddata.iStyle, huddata.iTrack);
-	huddata.fWR = (bReplay)? fReplayLength:Shavit_GetWorldRecord(huddata.iStyle, huddata.iTrack);
+	
+	// FIX: Don't call Shavit_GetWorldRecord if shavit-wr is not loaded.
+	if (bReplay)
+	{
+		huddata.fWR = fReplayLength;
+	}
+	else if (!gB_WR)
+	{
+		huddata.fWR = 0.0;
+	}
+	else
+	{
+		huddata.fWR = Shavit_GetWorldRecord(huddata.iStyle, huddata.iTrack);
+	}
+	
 	huddata.iTimerStatus = (bReplay)? Timer_Running:Shavit_GetTimerStatus(target);
 	huddata.bReplay = bReplay;
 	huddata.bPractice = (bReplay)? false:Shavit_IsPracticeMode(target);
@@ -1866,7 +1916,8 @@ void UpdateMainHUD(int client)
 			}
 			else
 			{
-				huddata.fWR = Shavit_GetWorldRecord(0, huddata.iTrack);
+				// FIX: Don't call Shavit_GetWorldRecord if shavit-wr is missing.
+				huddata.fWR = gB_WR ? Shavit_GetWorldRecord(0, huddata.iTrack) : 0.0;
 				huddata.fClosestReplayTime = Shavit_GetClosestReplayTime(target, huddata.fClosestReplayLength);
 			}
 		}
@@ -2244,13 +2295,13 @@ void UpdateTopLeftHUD(int client, bool wait)
 
 	int track = 0;
 	int style = 0;
-	float fTargetPB = 0.0;
+	// float fTargetPB = 0.0;
 
 	if (!bReplay)
 	{
 		style = Shavit_GetBhopStyle(target);
 		track = Shavit_GetClientTrack(target);
-		fTargetPB = Shavit_GetClientPB(target, style, track);
+		// fTargetPB = Shavit_GetClientPB(target, style, track);
 	}
 	else
 	{
@@ -2293,57 +2344,18 @@ void UpdateTopLeftHUD(int client, bool wait)
 
 	if ((gI_HUDSettings[client] & HUD_TOPLEFT))
 	{
-		float fWRTime = Shavit_GetWorldRecord(style, track);
+		sTopLeft[0] = '\0'; // Default empty
 
-		if (fWRTime != 0.0)
+		// Only show Target PB when spectating
+		if (target != client && gB_WR)
 		{
-			char sWRTime[16];
-			FormatSeconds(fWRTime, sWRTime, 16);
-
-			char sWRName[MAX_NAME_LENGTH];
-			Shavit_GetWRName(style, sWRName, MAX_NAME_LENGTH, track);
-
-			FormatEx(sTopLeft, sizeof(sTopLeft), "%sWR: %s (%s)", sTopLeft, sWRTime, sWRName);
-		}
-
-		char sTargetPB[64];
-		FormatSeconds(fTargetPB, sTargetPB, sizeof(sTargetPB));
-		Format(sTargetPB, sizeof(sTargetPB), "%T: %s", "HudBestText", client, sTargetPB);
-
-		float fSelfPB = Shavit_GetClientPB(client, style, track);
-		char sSelfPB[64];
-		FormatSeconds(fSelfPB, sSelfPB, sizeof(sSelfPB));
-		Format(sSelfPB, sizeof(sSelfPB), "%T: %s", "HudBestText", client, sSelfPB);
-
-		if ((gI_HUD2Settings[client] & HUD2_SPLITPB) == 0 && target != client)
-		{
-			if (fTargetPB != 0.0)
+			float fTargetPB = Shavit_GetClientPB(target, style, track);
+			if (fTargetPB > 0.0)
 			{
-				if ((gI_HUD2Settings[client] & HUD2_TOPLEFT_RANK) == 0)
-				{
-					Format(sTopLeft, sizeof(sTopLeft), "%s\n%s (#%d) (%N)", sTopLeft, sTargetPB, Shavit_GetRankForTime(style, fTargetPB, track), target);
-				}
-				else
-				{
-					Format(sTopLeft, sizeof(sTopLeft), "%s\n%s (%N)", sTopLeft, sTargetPB, target);
-				}
+				char sTargetPB[64];
+				FormatSeconds(fTargetPB, sTargetPB, sizeof(sTargetPB));
+				Format(sTopLeft, sizeof(sTopLeft), "%T: %s", "HudBestText", client, sTargetPB);
 			}
-
-			if (fSelfPB != 0.0)
-			{
-				if ((gI_HUD2Settings[client] & HUD2_TOPLEFT_RANK) == 0)
-				{
-					Format(sTopLeft, sizeof(sTopLeft), "%s\n%s (#%d) (%N)", sTopLeft, sSelfPB, Shavit_GetRankForTime(style, fSelfPB, track), client);
-				}
-				else
-				{
-					Format(sTopLeft, sizeof(sTopLeft), "%s\n%s (%N)", sTopLeft, sSelfPB, client);
-				}
-			}
-		}
-		else if (fSelfPB != 0.0)
-		{
-			Format(sTopLeft, sizeof(sTopLeft), "%s\n%s (#%d)", sTopLeft, sSelfPB, Shavit_GetRankForTime(style, fSelfPB, track));
 		}
 	}
 

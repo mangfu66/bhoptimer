@@ -265,6 +265,7 @@ public void OnPluginStart()
 	RegAdminCmd("sm_loadunzonedmap", Command_LoadUnzonedMap, ADMFLAG_CHANGEMAP, "Admin command for loading the next unzoned map");
 
 	RegConsoleCmd("sm_nominate", Command_Nominate, "Lets players nominate maps to be on the end of map vote");
+	RegConsoleCmd("sm_yd", Command_Nominate, "Lets players nominate maps to be on the end of map vote");
 	RegConsoleCmd("sm_unnominate", Command_UnNominate, "Removes nominations");
 	RegConsoleCmd("sm_rtv", Command_RockTheVote, "Lets players Rock The Vote");
 	RegConsoleCmd("sm_unrtv", Command_UnRockTheVote, "Lets players un-Rock The Vote");

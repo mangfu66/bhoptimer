@@ -114,6 +114,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	CreateNative("Shavit_SetReplayData", Native_SetReplayData);
 	CreateNative("Shavit_SetPlayerPreFrames", Native_SetPlayerPreFrames);
 	CreateNative("Shavit_AlsoSaveReplayTo", Native_AlsoSaveReplayTo);
+	CreateNative("Shavit_AdditionalReplayPath", Native_AdditionalReplayPath);
 
 	if (!FileExists("cfg/sourcemod/plugin.shavit-replay-recorder.cfg") && FileExists("cfg/sourcemod/plugin.shavit-replay.cfg"))
 	{
@@ -157,7 +158,7 @@ public void OnPluginStart()
 	gF_Tickrate = (1.0 / GetTickInterval());
 
 	gB_ReplayPlayback = LibraryExists("shavit-replay-playback");
-	gB_Floppy = LibraryExists("srcwr💾");
+	gB_Floppy = LibraryExists("srcwr沈");
 
 	if (gB_Late)
 	{
@@ -179,7 +180,7 @@ public void OnLibraryAdded(const char[] name)
 	{
 		gB_ReplayPlayback = true;
 	}
-	else if (StrEqual(name, "srcwr💾"))
+	else if (StrEqual(name, "srcwr沈"))
 	{
 		gB_Floppy = true;
 	}
@@ -191,7 +192,7 @@ public void OnLibraryRemoved(const char[] name)
 	{
 		gB_ReplayPlayback = false;
 	}
-	else if (StrEqual(name, "srcwr💾"))
+	else if (StrEqual(name, "srcwr沈"))
 	{
 		gB_Floppy = false;
 	}
@@ -782,4 +783,17 @@ public int Native_HijackAngles(Handle handler, int numParams)
 
 	gB_HijackFramesKeepOnStart[client] = (numParams < 5) ? false : view_as<bool>(GetNativeCell(5));
 	return ticks;
+}
+
+public int Native_AdditionalReplayPath(Handle plugin, int numParams)
+{
+    if (gA_PathsToSaveReplayTo == null)
+    {
+        return 0;
+    }
+    
+    char path[PLATFORM_MAX_PATH];
+    GetNativeString(1, path, sizeof(path));
+    gA_PathsToSaveReplayTo.PushString(path);
+    return 0;
 }
