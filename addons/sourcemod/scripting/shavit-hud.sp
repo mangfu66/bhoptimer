@@ -411,6 +411,8 @@ public void SQL_ConnectCallback(Database db, const char[] error, any data)
 	}
 	gH_SQL = db;
 	
+	gH_SQL.SetCharset("utf8mb4"); 
+	
 	// Re-fetch current map stuff now that DB is ready
 	// [FIX] Ensure map name matches DB (lowercase, no workshop path)
 	GetCurrentMap(gS_CurrentMap, sizeof(gS_CurrentMap));
@@ -628,7 +630,7 @@ public void OnClientPutInServer(int client)
 	}
 	
 	// Reset Settings
-	gI_WrPbState[client] = WrPb_Bottom; // Default to Bottom (Center HUD)
+	gI_WrPbState[client] = WrPb_Both; // Default to Both (TopLeft + Bottom)
 	gI_HudFontSize[client] = DEFAULT_FONT_SIZE;
 
 	if(IsFakeClient(client))
@@ -2265,7 +2267,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		if (data.fPB > 0.0 && gB_WR) {
 			// 2位小数 PB
 			char sRawPB[32];
-			Format(sRawPB, sizeof(sRawPB), "%.2f", data.fPB);
+			FormatSeconds(data.fPB, sRawPB, sizeof(sRawPB), true);
 			col = gI_HUDColors[client][Color_PB];
 			if (col != -1) Format(sPB, sizeof(sPB), "<span color='#%06X'>%s</span>", col, sRawPB);
 			else strcopy(sPB, sizeof(sPB), sRawPB);
@@ -2286,7 +2288,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 			
 		if (data.fWR > 0.0) {
 			char sRawWR[32];
-			Format(sRawWR, sizeof(sRawWR), "%.2f", data.fWR);
+			FormatSeconds(data.fWR, sRawWR, sizeof(sRawWR), true);
 			
 			col = gI_HUDColors[client][Color_WR];
 			if (col != -1) Format(sWR, sizeof(sWR), "<span color='#%06X'>%s</span>", col, sRawWR);
