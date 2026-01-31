@@ -158,7 +158,7 @@ public void OnPluginStart()
 	gF_Tickrate = (1.0 / GetTickInterval());
 
 	gB_ReplayPlayback = LibraryExists("shavit-replay-playback");
-	gB_Floppy = LibraryExists("srcwr沈");
+	gB_Floppy = LibraryExists("srcwr💾");
 
 	if (gB_Late)
 	{
@@ -180,7 +180,7 @@ public void OnLibraryAdded(const char[] name)
 	{
 		gB_ReplayPlayback = true;
 	}
-	else if (StrEqual(name, "srcwr沈"))
+	else if (StrEqual(name, "srcwr💾"))
 	{
 		gB_Floppy = true;
 	}
@@ -192,7 +192,7 @@ public void OnLibraryRemoved(const char[] name)
 	{
 		gB_ReplayPlayback = false;
 	}
-	else if (StrEqual(name, "srcwr沈"))
+	else if (StrEqual(name, "srcwr💾"))
 	{
 		gB_Floppy = false;
 	}
