@@ -48,6 +48,91 @@
 #define MAX_HINT_SIZE 227
 #define HUD_PRINTCENTER 4
 
+// =============================================================================
+// NEW: Custom Color System & WR Name Cache
+// =============================================================================
+enum HUDColorElement {
+	Color_Zone = 0,    // Zone Enter/Leave Text
+	Color_MapTier,     // Tier Text
+	Color_Time,        // Main Time
+	Color_Speed,       // Main Speed
+	Color_Jumps,       // Jumps Count
+	Color_Strafes,     // Strafes Count
+	Color_Sync,        // Sync Percent
+	Color_PB,          // Personal Best
+	Color_WR,          // World Record
+	Color_Rank,        // Rank (#123)
+	Color_Track,       // Track Name (Bonus/Main)
+	HUD_COLOR_COUNT
+}
+
+// Names for the menu
+char gS_ColorElementNames[HUD_COLOR_COUNT][] = {
+	"区域提示 (Zone)",
+	"地图难度 (Tier)",
+	"时间 (Time)",
+	"速度 (Speed)",
+	"跳跃数 (Jumps)",
+	"平移数 (Strafes)",
+	"同步率 (Sync)",
+	"个人纪录 (PB)",
+	"世界纪录 (WR)",
+	"当前排名 (Rank)",
+	"赛道名称 (Track)"
+};
+
+// Preset colors for the menu
+enum struct ColorPreset {
+	char name[32];
+	int color;
+}
+
+ColorPreset g_Presets[] = {
+	{"默认 (Default)", -1},
+	{"白色 (White)", 0xFFFFFF},
+	{"红色 (Red)", 0xFF0000},
+	{"绿色 (Green)", 0x00FF00},
+	{"蓝色 (Blue)", 0x00BFFF}, // Deep Sky Blue
+	{"黄色 (Yellow)", 0xFFFF00},
+	{"紫色 (Purple)", 0x9932CC}, // Dark Orchid
+	{"青色 (Cyan)", 0x00FFFF},
+	{"橙色 (Orange)", 0xFFA500},
+	{"粉色 (Pink)", 0xFF69B4},
+	{"灰色 (Grey)", 0xCCCCCC}
+};
+
+// Storage: -1 means default, otherwise HEX
+int gI_HUDColors[MAXPLAYERS+1][HUD_COLOR_COUNT];
+Handle gH_Cookie_HUDColors = null;
+
+// =============================================================================
+// NEW: WR/PB Tri-state & Font Size
+// =============================================================================
+enum WrPbState {
+	WrPb_Hidden = 0,
+	WrPb_TopLeft,
+	WrPb_Bottom,
+	WrPb_Both // Added "Both" state
+};
+
+WrPbState gI_WrPbState[MAXPLAYERS+1];
+int gI_HudFontSize[MAXPLAYERS+1];
+
+Handle gH_Cookie_WrPbState = null;
+Handle gH_Cookie_HudFontSize = null;
+
+#define DEFAULT_FONT_SIZE 18
+
+// =============================================================================
+// NEW: SQL WR Name Caching (To fix !wr name vs replay bot name)
+// =============================================================================
+Database gH_SQL = null;
+StringMap gSM_WRNames = null;
+char gS_CurrentMap[PLATFORM_MAX_PATH];
+char gS_MySQLPrefix[32]; // [FIX] Added prefix variable
+
+// =============================================================================
+
 enum struct color_t
 {
 	int r;
@@ -156,6 +241,10 @@ public void OnPluginStart()
 {
 	LoadTranslations("shavit-common.phrases");
 	LoadTranslations("shavit-hud.phrases");
+	
+	// Init WR Name Cache
+	gSM_WRNames = new StringMap();
+	GetTimerSQLPrefix(gS_MySQLPrefix, sizeof(gS_MySQLPrefix)); // [FIX] Get DB Prefix
 
 	// game-specific
 	gEV_Type = GetEngineVersion();
@@ -278,6 +367,13 @@ public void OnPluginStart()
 	// cookies
 	gH_HUDCookie = RegClientCookie("shavit_hud_setting", "HUD settings", CookieAccess_Protected);
 	gH_HUDCookieMain = RegClientCookie("shavit_hud_settingmain", "HUD settings for hint text.", CookieAccess_Protected);
+	
+	// NEW: Color Cookie
+	gH_Cookie_HUDColors = RegClientCookie("shavit_hud_colors", "Custom HUD Colors", CookieAccess_Protected);
+	
+	// NEW: Settings Cookies
+	gH_Cookie_WrPbState = RegClientCookie("shavit_hud_wrpb", "WR/PB Position", CookieAccess_Protected);
+	gH_Cookie_HudFontSize = RegClientCookie("shavit_hud_fontsize", "HUD Font Size", CookieAccess_Protected);
 
 	HookEvent("player_spawn", Player_Spawn);
 
@@ -299,7 +395,120 @@ public void OnPluginStart()
 			}
 		}
 	}
+	
+	// DB Connect (Fix for missing Shavit_GetDb)
+	// We connect to "shavit" conf which is the standard
+	Database.Connect(SQL_ConnectCallback, "shavit");
 }
+
+// SQL Caching Implementation
+public void SQL_ConnectCallback(Database db, const char[] error, any data)
+{
+	if (db == null)
+	{
+		LogError("Could not connect to database: %s", error);
+		return;
+	}
+	gH_SQL = db;
+	
+	// Re-fetch current map stuff now that DB is ready
+	// [FIX] Ensure map name matches DB (lowercase, no workshop path)
+	GetCurrentMap(gS_CurrentMap, sizeof(gS_CurrentMap));
+	GetMapDisplayName(gS_CurrentMap, gS_CurrentMap, sizeof(gS_CurrentMap));
+	int len = strlen(gS_CurrentMap);
+	for(int i=0;i<len;i++) if(IsCharUpper(gS_CurrentMap[i])) gS_CurrentMap[i] = CharToLower(gS_CurrentMap[i]);
+
+	if(gSM_WRNames != null)
+	{
+		gSM_WRNames.Clear();
+	}
+}
+
+public void OnMapStart()
+{
+	// [FIX] Ensure map name matches DB
+	GetCurrentMap(gS_CurrentMap, sizeof(gS_CurrentMap));
+	GetMapDisplayName(gS_CurrentMap, gS_CurrentMap, sizeof(gS_CurrentMap));
+	int len = strlen(gS_CurrentMap);
+	for(int i=0;i<len;i++) if(IsCharUpper(gS_CurrentMap[i])) gS_CurrentMap[i] = CharToLower(gS_CurrentMap[i]);
+
+	if(gSM_WRNames != null)
+	{
+		gSM_WRNames.Clear();
+	}
+}
+
+public void Shavit_OnWorldRecord(int client, int style, float time, int jumps, int strafes, float sync, int track)
+{
+	if (gSM_WRNames != null)
+	{
+		char sKey[32];
+		Format(sKey, sizeof(sKey), "%d_%d", style, track);
+		
+		char sName[MAX_NAME_LENGTH];
+		GetClientName(client, sName, sizeof(sName));
+		
+		gSM_WRNames.SetString(sKey, sName);
+	}
+}
+
+void GetCachedWRName(int style, int track, char[] buffer, int maxlen)
+{
+	char sKey[32];
+	Format(sKey, sizeof(sKey), "%d_%d", style, track);
+	
+	if (!gSM_WRNames.GetString(sKey, buffer, maxlen))
+	{
+		// FIX: If DB is not ready, return empty string so we don't show "Loading..." forever.
+		if (gH_SQL == null)
+		{
+			buffer[0] = '\0';
+			return;
+		}
+		
+		// If DB is ready, set temporary loading to debounce queries
+		strcopy(buffer, maxlen, "Loading...");
+		gSM_WRNames.SetString(sKey, "Loading...");
+		
+		// [FIX] Updated SQL query to JOIN with users table to get the name
+		char query[512];
+		Format(query, sizeof(query), "SELECT u.name FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE p.style = %d AND p.track = %d AND p.map = '%s' ORDER BY p.time ASC LIMIT 1", gS_MySQLPrefix, gS_MySQLPrefix, style, track, gS_CurrentMap);
+		
+		DataPack pack = new DataPack();
+		pack.WriteCell(style);
+		pack.WriteCell(track);
+		gH_SQL.Query(SQL_FetchWRNameCallback, query, pack);
+	}
+	else if (StrEqual(buffer, "N/A"))
+	{
+		// If cached as "N/A", just return empty string to avoid ugly text
+		buffer[0] = '\0';
+	}
+}
+
+public void SQL_FetchWRNameCallback(Database db, DBResultSet results, const char[] error, DataPack pack)
+{
+	pack.Reset();
+	int style = pack.ReadCell();
+	int track = pack.ReadCell();
+	delete pack;
+
+	char sKey[32];
+	Format(sKey, sizeof(sKey), "%d_%d", style, track);
+
+	if (results != null && results.FetchRow())
+	{
+		char sName[MAX_NAME_LENGTH];
+		results.FetchString(0, sName, sizeof(sName));
+		gSM_WRNames.SetString(sKey, sName);
+	}
+	else
+	{
+		// No record found, cache N/A
+		gSM_WRNames.SetString(sKey, "N/A");
+	}
+}
+// End SQL Caching
 
 public void OnLibraryAdded(const char[] name)
 {
@@ -411,6 +620,16 @@ public void OnClientPutInServer(int client)
 	gI_ScrollCount[client] = 0;
 	gB_FirstPrint[client] = false;
 	gB_AlternateCenterKeys[client] = false;
+	
+	// Reset Colors
+	for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
+	{
+		gI_HUDColors[client][i] = -1;
+	}
+	
+	// Reset Settings
+	gI_WrPbState[client] = WrPb_Bottom; // Default to Bottom (Center HUD)
+	gI_HudFontSize[client] = DEFAULT_FONT_SIZE;
 
 	if(IsFakeClient(client))
 	{
@@ -490,11 +709,58 @@ public void OnClientCookiesCached(int client)
 	}
 
 	gI_HUD2Settings[client] = StringToInt(sHUDSettings);
+	
+	// NEW: Load Colors
+	char sColors[256];
+	GetClientCookie(client, gH_Cookie_HUDColors, sColors, sizeof(sColors));
+	if (sColors[0] != '\0')
+	{
+		char sExploded[HUD_COLOR_COUNT][16];
+		ExplodeString(sColors, ";", sExploded, view_as<int>(HUD_COLOR_COUNT), 16);
+		for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
+		{
+			if (strcmp(sExploded[i], "def") == 0 || sExploded[i][0] == '\0') {
+				gI_HUDColors[client][i] = -1;
+			} else {
+				gI_HUDColors[client][i] = StringToInt(sExploded[i], 16);
+			}
+		}
+	}
+	
+	// NEW: Load WR/PB and Font settings
+	char sVal[8];
+	GetClientCookie(client, gH_Cookie_WrPbState, sVal, sizeof(sVal));
+	if (sVal[0] != '\0') gI_WrPbState[client] = view_as<WrPbState>(StringToInt(sVal));
+	
+	GetClientCookie(client, gH_Cookie_HudFontSize, sVal, sizeof(sVal));
+	if (sVal[0] != '\0') gI_HudFontSize[client] = StringToInt(sVal);
+	else gI_HudFontSize[client] = DEFAULT_FONT_SIZE;
 
 	if (gEV_Type != Engine_TF2 && IsValidClient(client, true) && GetClientTeam(client) > 1)
 	{
 		GivePlayerDefaultGun(client);
 	}
+}
+
+// NEW: Save Colors
+void SaveClientColors(int client)
+{
+	if (!AreClientCookiesCached(client)) return;
+	
+	char sBuffer[256];
+	for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
+	{
+		char sTemp[16];
+		if (gI_HUDColors[client][i] == -1) {
+			Format(sTemp, sizeof(sTemp), "def");
+		} else {
+			Format(sTemp, sizeof(sTemp), "%X", gI_HUDColors[client][i]);
+		}
+		
+		if (i > 0) StrCat(sBuffer, sizeof(sBuffer), ";");
+		StrCat(sBuffer, sizeof(sBuffer), sTemp);
+	}
+	SetClientCookie(client, gH_Cookie_HUDColors, sBuffer);
 }
 
 public void Player_ChangeClass(Event event, const char[] name, bool dontBroadcast)
@@ -610,7 +876,7 @@ void Frame_UpdateTopLeftHUD(int serial)
 {
 	int client = GetClientFromSerial(serial);
 
-	if (client && IsClientInGame(client))
+	if (client)
 	{
 		UpdateTopLeftHUD(client, false);
 	}
@@ -669,6 +935,115 @@ public Action Command_HUD(int client, int args)
 	return ShowHUDMenu(client, 0);
 }
 
+// =============================================================================
+// NEW: Color Menus
+// =============================================================================
+
+void ShowHUDColorsMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_HUDColors);
+	menu.SetTitle("HUD 颜色设置 (Custom Colors)");
+	
+	for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
+	{
+		char sInfo[8], sDisplay[64], sHex[16];
+		IntToString(i, sInfo, sizeof(sInfo));
+		
+		int color = gI_HUDColors[client][i];
+		if (color == -1) {
+			Format(sHex, sizeof(sHex), "默认 (Default)");
+		} else {
+			Format(sHex, sizeof(sHex), "#%06X", color);
+		}
+		
+		Format(sDisplay, sizeof(sDisplay), "%s [%s]", gS_ColorElementNames[i], sHex);
+		menu.AddItem(sInfo, sDisplay);
+	}
+	
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_HUDColors(Menu menu, MenuAction action, int param1, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		char sInfo[8];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		int element = StringToInt(sInfo);
+		
+		ShowColorPicker(param1, element);
+	}
+	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
+	{
+		ShowHUDMenu(param1, 0);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+void ShowColorPicker(int client, int element)
+{
+	Menu menu = new Menu(MenuHandler_ColorPicker);
+	
+	char sTitle[64];
+	Format(sTitle, sizeof(sTitle), "选择颜色: %s", gS_ColorElementNames[element]);
+	menu.SetTitle(sTitle);
+	
+	// Pass element index as hidden info
+	char sElement[8];
+	IntToString(element, sElement, sizeof(sElement));
+	
+	// Items
+	for (int i = 0; i < sizeof(g_Presets); i++)
+	{
+		// Info format: "element_index;color_value"
+		char sInfo[32];
+		Format(sInfo, sizeof(sInfo), "%d;%d", element, g_Presets[i].color);
+		
+		menu.AddItem(sInfo, g_Presets[i].name);
+	}
+	
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_ColorPicker(Menu menu, MenuAction action, int param1, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		char sInfo[32];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		
+		char sParts[2][16];
+		ExplodeString(sInfo, ";", sParts, 2, 16);
+		
+		int element = StringToInt(sParts[0]);
+		int color = StringToInt(sParts[1]);
+		
+		gI_HUDColors[param1][element] = color;
+		SaveClientColors(param1);
+		
+		PrintToChat(param1, " \x04[HUD]\x01 已将 \x03%s\x01 的颜色设置为 \x04%s", gS_ColorElementNames[element], (color == -1) ? "默认" : "自定义");
+		
+		// Return to color list
+		ShowHUDColorsMenu(param1);
+	}
+	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
+	{
+		ShowHUDColorsMenu(param1);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+// =============================================================================
+
 Action ShowHUDMenu(int client, int item)
 {
 	if(!IsValidClient(client))
@@ -713,9 +1088,10 @@ Action ShowHUDMenu(int client, int item)
 	FormatEx(sHudItem, 64, "%T", "HudHideWeapon", client);
 	menu.AddItem(sInfo, sHudItem);
 
-	FormatEx(sInfo, 16, "!%d", HUD_TOPLEFT);
-	FormatEx(sHudItem, 64, "%T", "HudTopLeft", client);
-	menu.AddItem(sInfo, sHudItem);
+	// REPLACED: Original HUD_TOPLEFT with WR/PB State Toggle
+	// Using "WRPB" as the key to hook into MenuHandler_HUD
+	// This usually corresponds to item 9 in the list (Page 2, Item 3 approx)
+	menu.AddItem("WRPB", "WR/PB HUD State"); // Logic inside DisplayItem will format this
 
 	if(IsSource2013(gEV_Type))
 	{
@@ -847,6 +1223,16 @@ Action ShowHUDMenu(int client, int item)
 		FormatEx(sInfo, 16, "@%d", HUD2_CENTERKEYS);
 		FormatEx(sHudItem, 64, "%T", "HudCenterKeys", client);
 		menu.AddItem(sInfo, sHudItem);
+		
+		// NEW ITEMS
+		
+		// Font Size
+		char sSize[32];
+		Format(sSize, sizeof(sSize), "[+] 字体大小: %dpx", gI_HudFontSize[client]);
+		menu.AddItem("FONT", sSize);
+		
+		// Add "HUD Colors" option at bottom
+		menu.AddItem("COLORS", "HUD 颜色设置 (Custom Colors)");
 	}
 
 	menu.ExitButton = true;
@@ -861,6 +1247,62 @@ public int MenuHandler_HUD(Menu menu, MenuAction action, int param1, int param2)
 	{
 		char sCookie[16];
 		menu.GetItem(param2, sCookie, 16);
+		
+		if (StrEqual(sCookie, "COLORS"))
+		{
+			ShowHUDColorsMenu(param1);
+			return 0;
+		}
+		else if (StrEqual(sCookie, "WRPB"))
+		{
+			// Cycle WR/PB: Bottom -> TopLeft -> Both -> Hidden -> Bottom
+			// Logic: 2 -> 1 -> 3 -> 0 -> 2
+			
+			if (gI_WrPbState[param1] == WrPb_Bottom) 
+			{
+				gI_WrPbState[param1] = WrPb_TopLeft;
+				gI_HUDSettings[param1] |= HUD_TOPLEFT;
+			}
+			else if (gI_WrPbState[param1] == WrPb_TopLeft) 
+			{
+				gI_WrPbState[param1] = WrPb_Both;
+				gI_HUDSettings[param1] |= HUD_TOPLEFT;
+			}
+			else if (gI_WrPbState[param1] == WrPb_Both)
+			{
+				gI_WrPbState[param1] = WrPb_Hidden;
+				gI_HUDSettings[param1] &= ~HUD_TOPLEFT;
+			}
+			else 
+			{
+				gI_WrPbState[param1] = WrPb_Bottom;
+				gI_HUDSettings[param1] &= ~HUD_TOPLEFT;
+			}
+			
+			// Save State
+			char sVal[8];
+			IntToString(view_as<int>(gI_WrPbState[param1]), sVal, sizeof(sVal));
+			SetClientCookie(param1, gH_Cookie_WrPbState, sVal);
+			
+			// Save HUD Settings Bitmask
+			IntToString(gI_HUDSettings[param1], sVal, sizeof(sVal));
+			SetClientCookie(param1, gH_HUDCookie, sVal);
+			
+			ShowHUDMenu(param1, GetMenuSelectionPosition());
+			return 0;
+		}
+		else if (StrEqual(sCookie, "FONT"))
+		{
+			// Cycle Font Size: 12 -> 40, step 2
+			gI_HudFontSize[param1] += 2;
+			if (gI_HudFontSize[param1] > 40) gI_HudFontSize[param1] = 12;
+			
+			char sVal[8];
+			IntToString(gI_HudFontSize[param1], sVal, sizeof(sVal));
+			SetClientCookie(param1, gH_Cookie_HudFontSize, sVal);
+			ShowHUDMenu(param1, GetMenuSelectionPosition());
+			return 0;
+		}
 
 		int type = (sCookie[0] == '!') ? 1 : (sCookie[0] == '@' ? 2 : 3);
 		ReplaceString(sCookie, 16, "!", "");
@@ -915,6 +1357,24 @@ public int MenuHandler_HUD(Menu menu, MenuAction action, int param1, int param2)
 		char sDisplay[64];
 		int style = 0;
 		menu.GetItem(param2, sInfo, 16, style, sDisplay, 64);
+		
+		if (StrEqual(sInfo, "WRPB"))
+		{
+			// Replacement Display logic for the standard Top Left item
+			char sState[32];
+			switch (gI_WrPbState[param1]) {
+				case WrPb_TopLeft: Format(sState, sizeof(sState), "[+] 左上角 (TopLeft)");
+				case WrPb_Bottom:  Format(sState, sizeof(sState), "[+] 底部 (Bottom)");
+				case WrPb_Both:    Format(sState, sizeof(sState), "[+] 全部 (Both)");
+				case WrPb_Hidden:  Format(sState, sizeof(sState), "[-] 隐藏 (Hidden)");
+			}
+			Format(sDisplay, sizeof(sDisplay), "%s HUD (WR/PB)", sState);
+			return RedrawMenuItem(sDisplay);
+		}
+		else if (StrEqual(sInfo, "COLORS") || StrEqual(sInfo, "FONT"))
+		{
+			return RedrawMenuItem(sDisplay);
+		}
 
 		int type = (sInfo[0] == '!') ? 1 : (sInfo[0] == '@' ? 2 : 3);
 		ReplaceString(sInfo, 16, "!", "");
@@ -1524,8 +1984,16 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 	int iLines = 0;
 	char sLine[128];
 	
-	// 使用 size='12' 字体
-	StrCat(buffer, maxlen, "<font size='12'><pre>");
+	// Helper to colorize
+	int col;
+
+	// 使用 size=xxx 字体 (默认 18)
+	int fontSize = gI_HudFontSize[client];
+	if (fontSize < 12) fontSize = 12; // Min limit
+	
+	char sHeader[64];
+	Format(sHeader, sizeof(sHeader), "<font size='%d'><pre>", fontSize);
+	StrCat(buffer, maxlen, sHeader);
 
 	// 调试信息 (如果开启)
 	if (gI_HUDSettings[client] & HUD_DEBUGTARGETNAME)
@@ -1549,9 +2017,13 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 	// 区域 HUD (Start/End Zone)
 	if (data.iZoneHUD != ZoneHUD_None && (gI_HUDSettings[client] & HUD_ZONEHUD))
 	{
+		// Color Logic for Zone
+		int zoneColor = gI_HUDColors[client][Color_Zone];
+		if (zoneColor == -1) zoneColor = ((gI_Gradient.r << 16) + (gI_Gradient.g << 8) + (gI_Gradient.b));
+		
 		FormatEx(sLine, sizeof(sLine),
 			"<span color='#%06X'>%T</span>",
-			((gI_Gradient.r << 16) + (gI_Gradient.g << 8) + (gI_Gradient.b)),
+			zoneColor,
 			(data.iZoneHUD == ZoneHUD_Start) ? "HudInStartZoneCSGO" : "HudInEndZoneCSGO",
 			client,
 			data.iSpeed
@@ -1580,12 +2052,20 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		// Map Tier
 		if (gB_Rankings && (gI_HUD2Settings[client] & HUD2_MAPTIER) == 0)
 		{
-			FormatEx(sLine, 128, "%T", "HudZoneTier", client, data.iMapTier);
+			// Color Logic for Tier
+			col = gI_HUDColors[client][Color_MapTier];
+			if (col != -1) {
+				FormatEx(sLine, 128, "<span color='#%06X'>%T</span>", col, "HudZoneTier", client, data.iMapTier);
+			} else {
+				FormatEx(sLine, 128, "%T", "HudZoneTier", client, data.iMapTier);
+			}
 			AddHUDLine(buffer, maxlen, sLine, iLines);
 		}
 		
 		// Speed
-		FormatEx(sLine, 128, "%d u/s", data.iSpeed);
+		col = gI_HUDColors[client][Color_Speed];
+		if (col != -1) FormatEx(sLine, 128, "<span color='#%06X'>%d u/s</span>", col, data.iSpeed);
+		else FormatEx(sLine, 128, "%d u/s", data.iSpeed);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
 		StrCat(buffer, maxlen, "</pre></font>");
@@ -1631,133 +2111,249 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		return iLines;
 	}
 
-	// === 第 1 行: 时间 (差值)   [间隔]   速度 (差值) ===
+	// -------------------------------------------------------------------------
+	// NEW LINE 1: 样式名称 | 赛道/难度 #实时排名 (Moved from bottom)
+	// -------------------------------------------------------------------------
 	
-	// 时间部分
-	char sTime[32], sTimeDiff[64];
-	FormatSeconds(data.fTime, sTime, 32, false);
+	char sStyleInfo[128];
+	sStyleInfo[0] = '\0';
 	
-	if (data.fClosestReplayTime != -1.0)
-	{
-		float fDifference = data.fTime - data.fClosestReplayTime;
-		char sDiffVal[32];
-		FormatSeconds(fDifference, sDiffVal, 32, false, FloatAbs(fDifference) >= 60.0);
-		
-		// 绿色为快 (-)，红色为慢 (+)
-		int diffColor = (fDifference <= 0.0) ? 0x00FF00 : 0xFF0000;
-		Format(sTimeDiff, sizeof(sTimeDiff), " (<span color='#%06X'>%s%s</span>)", diffColor, (fDifference >= 0.0) ? "+" : "", sDiffVal);
-	}
-	else
-	{
-		sTimeDiff[0] = '\0';
-	}
-	
-	// 速度部分
-	char sVelDiff[64];
-	if (data.fClosestReplayTime != -1.0)
-	{
-		float res = data.fClosestVelocityDifference;
-		// 绿色为快 (+)，红色为慢 (-)
-		int velColor = (res >= 0.0) ? 0x00FF00 : 0xFF0000;
-		Format(sVelDiff, sizeof(sVelDiff), " (<span color='#%06X'>%s%.0f</span>)", velColor, (res >= 0.0) ? "+" : "", res);
-	}
-	else
-	{
-		sVelDiff[0] = '\0';
-	}
-	
-	// 组合第1行
-	FormatEx(sLine, 128, "%s%s     %d u/s%s", sTime, sTimeDiff, data.iSpeed, sVelDiff);
-	AddHUDLine(buffer, maxlen, sLine, iLines);
-	
-	
-	// === 第 2 行: PB: xx.xx (#排名)     WR: xx.xx ===
-	
-	char sPB[32], sWR[32];
-	char sPBRankText[32]; // Buffer for rank text
-	sPBRankText[0] = '\0'; // Init empty
-
-	if (data.fPB > 0.0 && gB_WR)
-	{
-		// 使用 FormatSeconds 格式化 PB
-		FormatSeconds(data.fPB, sPB, sizeof(sPB), true);
-		// Fix: Use PB time for rank, not current time (data.iRank is live rank)
-		int iPBRank = Shavit_GetRankForTime(data.iStyle, data.fPB, data.iTrack);
-		// 保留 (#排名)
-		Format(sPBRankText, sizeof(sPBRankText), " (#%d)", iPBRank);
-	}
-	else
-	{
-		sPB = "N/A";
-		// No PB, so no rank display
-	}
-		
-	if (data.fWR > 0.0)
-		FormatSeconds(data.fWR, sWR, sizeof(sWR), true); // 使用 FormatSeconds 格式化 WR
-	else
-		sWR = "N/A";
-		
-	// 改回空格分隔
-	FormatEx(sLine, 128, "PB: %s%s     WR: %s", sPB, sPBRankText, sWR);
-	AddHUDLine(buffer, maxlen, sLine, iLines);
-	
-	
-	// === 第 3 行: 跳跃: xx   [间隔]   平移: xx (同步) ===
-	
-	char sSync[32];
-	if (data.fSync >= 0.0)
-		Format(sSync, sizeof(sSync), " (%.1f%%)", data.fSync);
-	else
-		sSync[0] = '\0';
-		
-	FormatEx(sLine, 128, "Jumps: %d     Strafes: %d%s", data.iJumps, data.iStrafes, sSync);
-	AddHUDLine(buffer, maxlen, sLine, iLines);
-	
-	
-	// === 第 4 行: 样式名称 | 赛道/难度 #实时排名 ===
-	
+	// Logic for Track Info / Tier
 	char sTrackInfo[64];
-	if (data.iTrack == Track_Main)
-	{
-		if (gB_Rankings && (gI_HUD2Settings[client] & HUD2_MAPTIER) == 0)
-		{
-			// 主赛道显示 Tier
-			Format(sTrackInfo, sizeof(sTrackInfo), "T%d", data.iMapTier);
+	
+	col = gI_HUDColors[client][Color_Track]; // Custom track color
+	if (col == -1 && data.iTrack == Track_Main) col = gI_HUDColors[client][Color_MapTier]; // Use tier color if main
+	
+	// Format Track Text
+	char sRawTrack[32];
+	if (data.iTrack == Track_Main) {
+		if (gB_Rankings && !(data.iHUD2Settings & HUD2_MAPTIER)) {
+			Format(sRawTrack, sizeof(sRawTrack), "T%d", data.iMapTier);
+		} else {
+			sRawTrack = "Main";
 		}
-		else
-		{
-			sTrackInfo = "Main";
+	} else {
+		if (!(data.iHUD2Settings & HUD2_TRACK)) {
+			GetTrackName(client, data.iTrack, sRawTrack, sizeof(sRawTrack));
+		} else {
+			sRawTrack[0] = '\0'; // Hidden
 		}
-	}
-	else
-	{
-		// Bonus 显示 Bonus 名称
-		GetTrackName(client, data.iTrack, sTrackInfo, sizeof(sTrackInfo));
 	}
 	
-	// Calculate and display live rank
+	// Apply Color to Track Name
+	if (sRawTrack[0] != '\0') {
+		if (col != -1) Format(sTrackInfo, sizeof(sTrackInfo), "<span color='#%06X'>%s</span>", col, sRawTrack);
+		else strcopy(sTrackInfo, sizeof(sTrackInfo), sRawTrack);
+	}
+	
+	// Logic for Live Rank
 	// 使用实时排名 (进终点前的排名)
-	if (gB_WR && data.iTimerStatus == Timer_Running)
-	{
-		// 只要在跑图就开始计算实时排名
+	if (gB_WR && data.iTimerStatus == Timer_Running && !(data.iHUD2Settings & HUD2_RANK)) {
 		int iLiveRank = Shavit_GetRankForTime(data.iStyle, data.fTime, data.iTrack);
+		
+		col = gI_HUDColors[client][Color_Rank];
+		char sRankText[16];
+		if (col != -1) Format(sRankText, sizeof(sRankText), "<span color='#%06X'>#%d</span>", col, iLiveRank);
+		else Format(sRankText, sizeof(sRankText), "#%d", iLiveRank);
+		
 		// 直接显示 #排名, 用空格隔开
-		if (data.fTime > 0.0)
-		{
-			Format(sTrackInfo, sizeof(sTrackInfo), "%s #%d", sTrackInfo, iLiveRank);
+		if (data.fTime > 0.0) {
+			if (sTrackInfo[0] != '\0')
+				Format(sTrackInfo, sizeof(sTrackInfo), "%s %s", sTrackInfo, sRankText);
+			else
+				strcopy(sTrackInfo, sizeof(sTrackInfo), sRankText);
 		}
 	}
 	
-	// [修复] 增加对 iStyle 的有效性检查
-	if (data.iStyle >= 0 && data.iStyle < gI_Styles)
-	{
-		FormatEx(sLine, 128, "<span color='#%s'>%s</span> | %s", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName, sTrackInfo);
+	// Logic for Style Name
+	char sStyleNameBuf[64];
+	sStyleNameBuf[0] = '\0';
+	
+	if (!(data.iHUD2Settings & HUD2_STYLE)) {
+		if (data.iStyle >= 0 && data.iStyle < gI_Styles) {
+			FormatEx(sStyleNameBuf, sizeof(sStyleNameBuf), "<span color='#%s'>%s</span>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
+		} else {
+			sStyleNameBuf = "Unknown";
+		}
 	}
-	else
-	{
-		FormatEx(sLine, 128, "Unknown Style | %s", sTrackInfo);
+	
+	// Combine Style + Track Info
+	if (sStyleNameBuf[0] != '\0' && sTrackInfo[0] != '\0') {
+		FormatEx(sStyleInfo, sizeof(sStyleInfo), "%s | %s", sStyleNameBuf, sTrackInfo);
+	} else if (sStyleNameBuf[0] != '\0') {
+		FormatEx(sStyleInfo, sizeof(sStyleInfo), "%s", sStyleNameBuf);
+	} else if (sTrackInfo[0] != '\0') {
+		FormatEx(sStyleInfo, sizeof(sStyleInfo), "%s", sTrackInfo);
 	}
-	AddHUDLine(buffer, maxlen, sLine, iLines);
+	
+	if (sStyleInfo[0] != '\0') {
+		AddHUDLine(buffer, maxlen, sStyleInfo, iLines);
+	}
+
+
+	// -------------------------------------------------------------------------
+	// NEW LINE 2: 时间 (差值)   [间隔]   速度 (差值) (Was Line 1)
+	// -------------------------------------------------------------------------
+	
+	char sTimePart[256] = ""; // Increased buffer for color tags
+	char sSpeedPart[256] = "";
+	
+	// Time Logic (Controlled by HUD2_TIME)
+	if (!(data.iHUD2Settings & HUD2_TIME)) {
+		char sTime[64], sTimeDiff[64]; // sTime needs more space for color
+		
+		col = gI_HUDColors[client][Color_Time];
+		char sRawTime[32];
+		FormatSeconds(data.fTime, sRawTime, 32, false);
+		
+		if (col != -1) Format(sTime, sizeof(sTime), "<span color='#%06X'>%s</span>", col, sRawTime);
+		else strcopy(sTime, sizeof(sTime), sRawTime);
+		
+		if (data.fClosestReplayTime != -1.0 && !(data.iHUD2Settings & HUD2_TIMEDIFFERENCE)) {
+			float fDifference = data.fTime - data.fClosestReplayTime;
+			char sDiffVal[32];
+			FormatSeconds(fDifference, sDiffVal, 32, false, FloatAbs(fDifference) >= 60.0);
+			
+			// 绿色为快 (-)，红色为慢 (+)
+			int diffColor = (fDifference <= 0.0) ? 0x00FF00 : 0xFF0000;
+			Format(sTimeDiff, sizeof(sTimeDiff), " (<span color='#%06X'>%s%s</span>)", diffColor, (fDifference >= 0.0) ? "+" : "", sDiffVal);
+		} else {
+			sTimeDiff[0] = '\0';
+		}
+		Format(sTimePart, sizeof(sTimePart), "%s%s", sTime, sTimeDiff);
+	}
+	
+	// Speed Logic (Controlled by HUD2_SPEED)
+	if (!(data.iHUD2Settings & HUD2_SPEED)) {
+		char sVelDiff[64];
+		if (data.fClosestReplayTime != -1.0 && !(data.iHUD2Settings & HUD2_VELOCITYDIFFERENCE)) {
+			float res = data.fClosestVelocityDifference;
+			// 绿色为快 (+)，红色为慢 (-)
+			int velColor = (res >= 0.0) ? 0x00FF00 : 0xFF0000;
+			Format(sVelDiff, sizeof(sVelDiff), " (<span color='#%06X'>%s%.0f</span>)", velColor, (res >= 0.0) ? "+" : "", res);
+		} else {
+			sVelDiff[0] = '\0';
+		}
+		
+		col = gI_HUDColors[client][Color_Speed];
+		if (col != -1) Format(sSpeedPart, sizeof(sSpeedPart), "<span color='#%06X'>%d u/s</span>%s", col, data.iSpeed, sVelDiff);
+		else Format(sSpeedPart, sizeof(sSpeedPart), "%d u/s%s", data.iSpeed, sVelDiff);
+	}
+	
+	// Combine Line 2
+	if (sTimePart[0] != '\0' && sSpeedPart[0] != '\0') {
+		FormatEx(sLine, 128, "%s     %s", sTimePart, sSpeedPart);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+	} else if (sTimePart[0] != '\0') {
+		AddHUDLine(buffer, maxlen, sTimePart, iLines);
+	} else if (sSpeedPart[0] != '\0') {
+		AddHUDLine(buffer, maxlen, sSpeedPart, iLines);
+	}
+	
+	
+	// -------------------------------------------------------------------------
+	// NEW LINE 3: PB: xx.xx (#排名)     WR: xx.xx (Was Line 2)
+	// -------------------------------------------------------------------------
+	// FIX: BUG: Hiding time (HUD2_TIME) also hides WR/PB. 
+	// Fix implemented: Check gI_WrPbState (if set to Bottom OR Both) instead of HUD2_TIME.
+	
+	if (gI_WrPbState[client] == WrPb_Bottom || gI_WrPbState[client] == WrPb_Both) {
+		char sPB[64], sWR[64];
+		char sPBRankText[64]; // Buffer for rank text
+		sPBRankText[0] = '\0'; // Init empty
+
+		if (data.fPB > 0.0 && gB_WR) {
+			// 2位小数 PB
+			char sRawPB[32];
+			Format(sRawPB, sizeof(sRawPB), "%.2f", data.fPB);
+			col = gI_HUDColors[client][Color_PB];
+			if (col != -1) Format(sPB, sizeof(sPB), "<span color='#%06X'>%s</span>", col, sRawPB);
+			else strcopy(sPB, sizeof(sPB), sRawPB);
+			
+			// Show PB rank if HUD2_RANK is not disabled
+			if (!(data.iHUD2Settings & HUD2_RANK)) {
+				// Fix: Use PB time for rank, not current time (data.iRank is live rank)
+				int iPBRank = Shavit_GetRankForTime(data.iStyle, data.fPB, data.iTrack);
+				
+				// Apply Rank Color
+				col = gI_HUDColors[client][Color_Rank];
+				if (col != -1) Format(sPBRankText, sizeof(sPBRankText), " (<span color='#%06X'>#%d</span>)", col, iPBRank);
+				else Format(sPBRankText, sizeof(sPBRankText), " (#%d)", iPBRank);
+			}
+		} else {
+			sPB = "N/A";
+		}
+			
+		if (data.fWR > 0.0) {
+			char sRawWR[32];
+			Format(sRawWR, sizeof(sRawWR), "%.2f", data.fWR);
+			
+			col = gI_HUDColors[client][Color_WR];
+			if (col != -1) Format(sWR, sizeof(sWR), "<span color='#%06X'>%s</span>", col, sRawWR);
+			else strcopy(sWR, sizeof(sWR), sRawWR);
+		} else {
+			sWR = "N/A";
+		}
+			
+		// 改回空格分隔
+		FormatEx(sLine, 128, "PB: %s%s     WR: %s", sPB, sPBRankText, sWR);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+	}
+	
+	
+	// -------------------------------------------------------------------------
+	// NEW LINE 4: 跳跃: xx   [间隔]   平移: xx (同步) (Was Line 3)
+	// -------------------------------------------------------------------------
+	
+	char sJumpPart[128] = "";
+	char sStrafePart[128] = "";
+	
+	// Jumps Logic (Controlled by HUD2_JUMPS)
+	if (!(data.iHUD2Settings & HUD2_JUMPS)) {
+		col = gI_HUDColors[client][Color_Jumps];
+		
+		if (!Shavit_GetStyleSettingBool(data.iStyle, "autobhop") && (gI_HUDSettings[client] & HUD_PERFS_CENTER)) {
+			// Perfs included
+			if (col != -1) {
+				Format(sJumpPart, sizeof(sJumpPart), "Jumps: <span color='#%06X'>%d (%.1f%%)</span>", col, data.iJumps, Shavit_GetPerfectJumps(data.iTarget));
+			} else {
+				Format(sJumpPart, sizeof(sJumpPart), "Jumps: %d (%.1f%%)", data.iJumps, Shavit_GetPerfectJumps(data.iTarget));
+			}
+		} else {
+			if (col != -1) {
+				Format(sJumpPart, sizeof(sJumpPart), "Jumps: <span color='#%06X'>%d</span>", col, data.iJumps);
+			} else {
+				Format(sJumpPart, sizeof(sJumpPart), "Jumps: %d", data.iJumps);
+			}
+		}
+	}
+	
+	// Strafes Logic (Controlled by HUD2_STRAFE)
+	if (!(data.iHUD2Settings & HUD2_STRAFE)) {
+		char sSync[64];
+		// Sync is controlled by HUD2_SYNC
+		col = gI_HUDColors[client][Color_Sync];
+		if (!(data.iHUD2Settings & HUD2_SYNC) && data.fSync >= 0.0) {
+			if (col != -1) Format(sSync, sizeof(sSync), " (<span color='#%06X'>%.1f%%</span>)", col, data.fSync);
+			else Format(sSync, sizeof(sSync), " (%.1f%%)", data.fSync);
+		} else {
+			sSync[0] = '\0';
+		}
+		
+		col = gI_HUDColors[client][Color_Strafes];
+		if (col != -1) Format(sStrafePart, sizeof(sStrafePart), "Strafes: <span color='#%06X'>%d</span>%s", col, data.iStrafes, sSync);
+		else Format(sStrafePart, sizeof(sStrafePart), "Strafes: %d%s", data.iStrafes, sSync);
+	}
+	
+	// Combine Line 4
+	if (sJumpPart[0] != '\0' && sStrafePart[0] != '\0') {
+		FormatEx(sLine, 128, "%s     %s", sJumpPart, sStrafePart);
+		AddHUDLine(buffer, maxlen, sLine, iLines);
+	} else if (sJumpPart[0] != '\0') {
+		AddHUDLine(buffer, maxlen, sJumpPart, iLines);
+	} else if (sStrafePart[0] != '\0') {
+		AddHUDLine(buffer, maxlen, sStrafePart, iLines);
+	}
 
 	StrCat(buffer, maxlen, "</pre></font>");
 
@@ -2347,13 +2943,61 @@ void UpdateTopLeftHUD(int client, bool wait)
 		sTopLeft[0] = '\0'; // Default empty
 
 		// Only show Target PB when spectating
-		if (target != client && gB_WR)
+		// Standard Logic (Kept for compatibility if not using Tri-state or for default view)
+		// But if using Tri-State TopLeft, we override or append.
+		
+		// NEW: WR/PB Tri-state for Top Left
+		if ((gI_WrPbState[client] == WrPb_TopLeft || gI_WrPbState[client] == WrPb_Both) && gB_WR)
 		{
+			// Get Data
+			float fPB = Shavit_GetClientPB(target, style, track);
+			float fWR = Shavit_GetWorldRecord(style, track);
+
+			// Logic to hide if no records exist (requested optimization)
+			// If both WR and PB are 0 (or less/none), we simply don't append anything to sTopLeft.
+			// However, usually WR exists if PB exists.
+			
+			if (fWR > 0.0) 
+			{
+				// Add separator if text exists
+				if (strlen(sTopLeft) > 0) StrCat(sTopLeft, sizeof(sTopLeft), "\n");
+				
+				char sPB[32], sWR[32];
+				if (fWR > 0.0) FormatSeconds(fWR, sWR, sizeof(sWR), true); // Changed to true to force full format
+				else sWR = "N/A";
+
+				// Try to get cached WR name
+				char sWRName[MAX_NAME_LENGTH];
+				GetCachedWRName(style, track, sWRName, sizeof(sWRName));
+
+				// Format WR Line
+                if (sWRName[0] != '\0')
+                {
+				    Format(sTopLeft, sizeof(sTopLeft), "%sWR: %s (%s)", sTopLeft, sWR, sWRName);
+                }
+                else
+                {
+                    Format(sTopLeft, sizeof(sTopLeft), "%sWR: %s", sTopLeft, sWR);
+                }
+
+				// Only add PB line if PB exists
+				if (fPB > 0.0)
+				{
+					FormatSeconds(fPB, sPB, sizeof(sPB), true); // Changed to true to force full format
+					int iPBRank = Shavit_GetRankForTime(style, fPB, track);
+					Format(sTopLeft, sizeof(sTopLeft), "%s\nPB: %s (#%d)", sTopLeft, sPB, iPBRank);
+				}
+			}
+			// If fWR <= 0.0, we assume no records at all, so we print nothing extra.
+		}
+		else if (target != client && gB_WR) 
+		{
+			// Fallback: Old logic for spectating target PB if not using new mode
 			float fTargetPB = Shavit_GetClientPB(target, style, track);
 			if (fTargetPB > 0.0)
 			{
 				char sTargetPB[64];
-				FormatSeconds(fTargetPB, sTargetPB, sizeof(sTargetPB));
+				FormatSeconds(fTargetPB, sTargetPB, sizeof(sTargetPB), true); // Changed to true to force full format
 				Format(sTopLeft, sizeof(sTopLeft), "%T: %s", "HudBestText", client, sTargetPB);
 			}
 		}
