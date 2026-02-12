@@ -26,8 +26,8 @@
 
 #define SHAVIT_VERSION_MAJOR 4
 #define SHAVIT_VERSION_MINOR 0
-#define SHAVIT_VERSION_PATCH 2
-#define SHAVIT_VERSION "4.0.2a"
+#define SHAVIT_VERSION_PATCH 0
+#define SHAVIT_VERSION "4.0.0a"
 #define STYLE_LIMIT 256
 
 // god i fucking hate sourcemod. NULL_VECTOR isn't const so it's not guaranteed to be 0,0,0
@@ -908,15 +908,24 @@ native void Shavit_FinishMap(int client, int track);
  * Retrieve a client's current time.
  *
  * @param client					Client index.
- * @return                          Current time.
+ * @return                          			Current time.
  */
 native float Shavit_GetClientTime(int client);
+
+
+/**
+ * Retrieve a client's current key combo.
+ *
+ * @param client					Client index.
+ * @return                          			Current key combo.
+ */
+native int Shavit_GetClientKeyCombo(int client);
 
 /**
  * Retrieve the client's track. (Track_Main/Track_Bonus etc..)
  *
  * @param client					Client index.
- * @return                          Timer track.
+ * @return                          			Timer track.
  */
 native int Shavit_GetClientTrack(int client);
 
@@ -924,7 +933,7 @@ native int Shavit_GetClientTrack(int client);
  * Retrieve client jumps since timer start.
  *
  * @param client					Client index.
- * @return                          Current amount of jumps, 0 if timer is inactive.
+ * @return                          			Current amount of jumps, 0 if timer is inactive.
  */
 native int Shavit_GetClientJumps(int client);
 
@@ -940,7 +949,7 @@ native int Shavit_GetBhopStyle(int client);
  * Retrieve a client's timer status
  *
  * @param client					Client index.
- * @return                          See TimerStatus enum.
+ * @return                          			See TimerStatus enum.
  */
 native TimerStatus Shavit_GetTimerStatus(int client);
 
@@ -949,7 +958,7 @@ native TimerStatus Shavit_GetTimerStatus(int client);
  * Will return 0 if timer isn't running.
  *
  * @param client					Client index.
- * @return                          Amount of strafes since timer start.
+ * @return                         			Amount of strafes since timer start.
  */
 native int Shavit_GetStrafeCount(int client);
 
@@ -958,7 +967,7 @@ native int Shavit_GetStrafeCount(int client);
  * Will return 100.0 if no jumps were measured.
  *
  * @param client					Client index.
- * @return                          Perfect jump percentage.
+ * @return                          			Perfect jump percentage.
  */
 native float Shavit_GetPerfectJumps(int client);
 
@@ -967,7 +976,7 @@ native float Shavit_GetPerfectJumps(int client);
  * Will return 0.0 if timer isn't running or -1.0 when not measured.
  *
  * @param client					Client index.
- * @return                          Amount of strafes since timer start.
+ * @return                          			Amount of strafes since timer start.
  */
 native float Shavit_GetSync(int client);
 

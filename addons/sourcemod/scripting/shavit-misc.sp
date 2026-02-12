@@ -1214,8 +1214,49 @@ void UpdateClanTag(int client)
 		IntToString(Shavit_GetRank(client), sRank, 8);
 	}
 
-	ReplaceString(sCustomTag, 32, "{style}", gS_StyleStrings[gI_Style[client]].sStyleName);
-	ReplaceString(sCustomTag, 32, "{styletag}", gS_StyleStrings[gI_Style[client]].sClanTag);
+	char sStyle[64];
+	char sStyleTag[64];
+	
+	strcopy(sStyle, 64, gS_StyleStrings[gI_Style[client]].sStyleName);
+	strcopy(sStyleTag, 64, gS_StyleStrings[gI_Style[client]].sClanTag);
+	
+	if(Shavit_GetStyleSettingBool(gI_Style[client], "a_or_d_only"))
+	{
+		char sStyleKey1[16] = "A-Only";
+		char sStyleKey2[16] = "D-Only";
+		char sStyleTagKey1[16] = "A";
+		char sStyleTagKey2[16] = "D";
+
+		if(StrEqual(gS_StyleStrings[gI_Style[client]].sStyleName, "W-A/W-D-Only"))
+		{
+			sStyleKey1 = "W-A-Only";
+			sStyleKey2 = "W-D-Only";
+			sStyleTagKey1 = "W-A";
+			sStyleTagKey2 = "W-D";
+		}
+		if(StrEqual(gS_StyleStrings[gI_Style[client]].sStyleName, "A/D-Only Pro"))
+		{
+			sStyleKey1 = "A-Only Pro";
+			sStyleKey2 = "D-Only Pro";
+			sStyleTagKey1 = "APro";
+			sStyleTagKey2 = "DPro";
+		}
+		
+		if (Shavit_GetClientKeyCombo(client) == 0)
+		{
+			sStyle = sStyleKey1;
+			sStyleTag = sStyleTagKey1;
+			
+		}
+		else if (Shavit_GetClientKeyCombo(client) == 1)
+		{
+			sStyle = sStyleKey2;
+			sStyleTag = sStyleTagKey2;
+		}
+	}
+	
+	ReplaceString(sCustomTag, 32, "{style}", sStyle);
+	ReplaceString(sCustomTag, 32, "{styletag}", sStyleTag);
 	ReplaceString(sCustomTag, 32, "{time}", sTime);
 	ReplaceString(sCustomTag, 32, "{tr}", sTrack);
 	ReplaceString(sCustomTag, 32, "{rank}", sRank);
@@ -2436,8 +2477,34 @@ public Action Shavit_OnStart(int client)
 public void Shavit_OnWorldRecord(int client, int style, float time, int jumps, int strafes, float sync, int track)
 {
 	char sUpperCase[64];
-	strcopy(sUpperCase, 64, gS_StyleStrings[style].sStyleName);
 
+	strcopy(sUpperCase, sizeof(sUpperCase), gS_StyleStrings[style].sStyleName);
+
+	if(Shavit_GetStyleSettingBool(style, "a_or_d_only"))
+	{
+		char sStyleKey1[16] = "A-Only";
+		char sStyleKey2[16] = "D-Only";
+
+		if(StrEqual(gS_StyleStrings[style].sStyleName, "W-A/W-D-Only"))
+		{
+			sStyleKey1 = "W-A-Only";
+			sStyleKey2 = "W-D-Only";
+		}
+		if(StrEqual(gS_StyleStrings[style].sStyleName, "A/D-Only Pro"))
+		{
+			sStyleKey1 = "A-Only Pro";
+			sStyleKey2 = "D-Only Pro";
+		}
+		if (Shavit_GetClientKeyCombo(client) == 0)
+		{
+			sUpperCase = sStyleKey1;
+		}
+		else if (Shavit_GetClientKeyCombo(client) == 1)
+		{
+			sUpperCase = sStyleKey2;
+		}
+	}
+	
 	for(int i = 0; i < strlen(sUpperCase); i++)
 	{
 		if(!IsCharUpper(sUpperCase[i]))

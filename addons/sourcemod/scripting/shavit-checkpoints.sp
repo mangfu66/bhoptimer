@@ -92,6 +92,7 @@ ArrayList gA_Checkpoints[MAXPLAYERS+1];
 int gI_CurrentCheckpoint[MAXPLAYERS+1];
 int gI_TimesTeleported[MAXPLAYERS+1];
 bool gB_InCheckpointMenu[MAXPLAYERS+1];
+bool gB_CPMenuClosedByMenu[MAXPLAYERS+1];
 
 int gI_UsingCheckpointsOwner[MAXPLAYERS+1]; // 0 = use player's own checkpoints
 
@@ -207,7 +208,7 @@ public void OnPluginStart()
 	gCV_UseOthers = new Convar("shavit_checkpoints_useothers", "1", "Allow players to use or duplicate another player's checkpoints.", 0, true, 0.0, true, 1.0);
 	gCV_RestoreStates = new Convar("shavit_checkpoints_restorestates", "1", "Save the players' timer/position etc.. when they die/change teams,\nand load the data when they spawn?\n0 - Disabled\n1 - Enabled", 0, true, 0.0, true, 1.0);
 	gCV_MaxCP = new Convar("shavit_checkpoints_maxcp", "1000", "Maximum amount of checkpoints.\nNote: Very high values will result in high memory usage!", 0, true, 1.0, true, 10000.0);
-	gCV_MaxCP_Segmented = new Convar("shavit_checkpoints_maxcp_seg", "10", "Maximum amount of segmented checkpoints. Make this less or equal to shavit_checkpoints_maxcp.\nNote: Very high values will result in HUGE memory usage! Segmented checkpoints contain frame data!", 0, true, 1.0, true, 50.0);
+	gCV_MaxCP_Segmented = new Convar("shavit_checkpoints_maxcp_seg", "1000", "Maximum amount of segmented checkpoints. Make this less or equal to shavit_checkpoints_maxcp.\nNote: Very high values will result in HUGE memory usage! Segmented checkpoints contain frame data!", 0, true, 1.0, true, 10000.0);
 	gCV_PersistData = new Convar("shavit_checkpoints_persistdata", "600", "How long to persist timer data for disconnected users in seconds?\n-1 - Until map change\n0 - Disabled", 0, true, -1.0);
 
 	Convar.AutoExecConfig();
@@ -446,8 +447,9 @@ public Action Timer_PersistCPMenu(Handle timer)
 
 	for(int i = 1; i <= MaxClients; i++)
 	{
-		if(IsClientInGame(i) && IsPlayerAlive(i) && !IsFakeClient(i) && ShouldReopenCheckpointMenu(i))
+		if(IsClientInGame(i) && IsPlayerAlive(i) && !IsFakeClient(i) && GetClientTeam(i) >= 2 && GetClientMenu(i, null) == MenuSource_None && (ShouldReopenCheckpointMenu(i) || gB_CPMenuClosedByMenu[i]))
 		{
+			gB_CPMenuClosedByMenu[i] = false;
 			OpenCPMenu(i);
 		}
 	}
@@ -510,6 +512,7 @@ public void OnClientPutInServer(int client)
 	}
 
 	gB_SaveStates[client] = false;
+	gB_CPMenuClosedByMenu[client] = false;
 	gI_UsingCheckpointsOwner[client] = 0;
 }
 
@@ -576,9 +579,17 @@ public void Shavit_OnStyleChanged(int client, int oldstyle, int newstyle, int tr
 		if (bKzcheckpoints)
 		{
 			gI_UsingCheckpointsOwner[client] = 0;
+			
+			if (Shavit_GetStyleSettingBool(oldstyle, "segments"))
+				OpenCheckpointsMenu(client);
 		}
-
-		OpenCheckpointsMenu(client);
+		else if (bSegmented && Shavit_GetStyleSettingBool(oldstyle, "kzcheckpoints"))
+		{
+			OpenCheckpointsMenu(client);
+		}
+		
+		gB_InCheckpointMenu[client] = true;
+		
 
 		if (!Shavit_GetStyleSettingBool(oldstyle, "segments") && !Shavit_GetStyleSettingBool(oldstyle, "kzcheckpoints"))
 		{
@@ -604,7 +615,7 @@ public Action Shavit_OnStart(int client)
 public void Shavit_OnRestart(int client, int track)
 {
 	if(gB_InCheckpointMenu[client] &&
-		Shavit_GetStyleSettingInt(gI_Style[client], "kzcheckpoints") &&
+		(Shavit_GetStyleSettingInt(gI_Style[client], "kzcheckpoints") || Shavit_GetStyleSettingInt(gI_Style[client], "segments")) &&
 		GetClientMenu(client, null) == MenuSource_None &&
 		IsPlayerAlive(client) && GetClientTeam(client) >= 2)
 	{
@@ -646,7 +657,7 @@ public void Player_Spawn(Event event, const char[] name, bool dontBroadcast)
 
 	// refreshes kz cp menu if there is nothing open
 	if (gB_InCheckpointMenu[client] &&
-		Shavit_GetStyleSettingInt(gI_Style[client], "kzcheckpoints") &&
+		(Shavit_GetStyleSettingInt(gI_Style[client], "kzcheckpoints") || Shavit_GetStyleSettingInt(gI_Style[client], "segments")) &&
 		GetClientMenu(client, null) == MenuSource_None &&
 		IsPlayerAlive(client) && GetClientTeam(client) >= 2)
 	{
@@ -862,6 +873,7 @@ public Action Command_Checkpoints(int client, int args)
 		return Plugin_Handled;
 	}
 
+	gB_InCheckpointMenu[client] = true;
 	return OpenCheckpointsMenu(client);
 }
 
@@ -885,7 +897,7 @@ public Action Command_Save(int client, int args)
 
 	if(SaveCheckpoint(client))
 	{
-		Shavit_PrintToChat(client, "%T", "MiscCheckpointsSaved", client, gI_CurrentCheckpoint[client], gS_ChatStrings.sVariable, gS_ChatStrings.sText);
+		//Shavit_PrintToChat(client, "%T", "MiscCheckpointsSaved", client, gI_CurrentCheckpoint[client], gS_ChatStrings.sVariable, gS_ChatStrings.sText);
 
 		if (ShouldReopenCheckpointMenu(client))
 		{
@@ -1104,7 +1116,8 @@ void OpenCPMenu(int client)
 
 	// apparently this is the fix
 	// menu.AddItem("spacer", "", ITEMDRAW_RAWLINE);
-
+	// ^this is the how to add a spacer, if you are using a panel.. in this case, it's a menu.. so it doesn't do anything -olivia 19/Jun/2025
+	
 	bool tas_timescale = (Shavit_GetStyleSettingFloat(Shavit_GetBhopStyle(client), "tas_timescale") == -1.0);
 
 	if (tas_timescale)
@@ -1311,19 +1324,24 @@ public int MenuHandler_Checkpoints(Menu menu, MenuAction action, int param1, int
 
 		return RedrawMenuItem(sDisplay);
 	}
-	else if (action == MenuAction_Display)
-	{
-		gB_InCheckpointMenu[param1] = true;
-	}
 	else if (action == MenuAction_Cancel)
 	{
+		if (param2 == MenuCancel_Interrupted) //menu was closed by another menu
+		{
+			gB_CPMenuClosedByMenu[param1] = true;
+			gB_InCheckpointMenu[param1] = true;
+			return Plugin_Handled;
+		}
 		gB_InCheckpointMenu[param1] = false;
+		return Plugin_Handled;
 	}
 	else if(action == MenuAction_End)
 	{
 		delete menu;
+		return Plugin_Handled;
 	}
-
+	
+	gB_InCheckpointMenu[param1] = true;
 	return 0;
 }
 
