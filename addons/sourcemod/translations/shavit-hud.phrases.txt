@@ -159,10 +159,6 @@
 	{
 		"en"		"Disable Spectator list while alive"
 	}
-	"HudLandfix"
-	{
-		"en"		"Landfix"
-	}
 	"HudKeyOverlay"
 	{
 		"en"		"Key display"
@@ -226,7 +222,7 @@
 	}
 	"NoReplayData"
 	{
-		"en"		"No replay data loaded\nPress USE to play"
+		"en"		"No replay data loaded\nPress USE or beat #1 to play"
 	}
 	"NoReplayDataTF2"
 	{

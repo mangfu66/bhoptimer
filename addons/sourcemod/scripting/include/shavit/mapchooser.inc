@@ -1,6 +1,6 @@
 /*
  * shavit's Timer - mapchooser.inc file
- * by: SlidyBat, KiD Fearless, mbhound, rtldg, olivia
+ * by: SlidyBat, KiD Fearless, mbhound, rtldg
  *
  * This file is part of shavit's Timer (https://github.com/shavitush/bhoptimer)
  *
