@@ -45,7 +45,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define MAX_HINT_SIZE 227
+#define MAX_HINT_SIZE 1024
 #define HUD_PRINTCENTER 4
 
 // =============================================================================
@@ -121,7 +121,7 @@ int gI_HudFontSize[MAXPLAYERS+1];
 Handle gH_Cookie_WrPbState = null;
 Handle gH_Cookie_HudFontSize = null;
 
-#define DEFAULT_FONT_SIZE 18
+#define DEFAULT_FONT_SIZE 14
 
 // =============================================================================
 // NEW: SQL WR Name Caching (To fix !wr name vs replay bot name)
@@ -2261,47 +2261,27 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 	
 	if (gI_WrPbState[client] == WrPb_Bottom || gI_WrPbState[client] == WrPb_Both) {
 		char sPB[64], sWR[64];
-		char sPBRankText[64]; // Buffer for rank text
-		sPBRankText[0] = '\0'; // Init empty
-
-		if (data.fPB > 0.0 && gB_WR) {
-			// 2位小数 PB
-			char sRawPB[32];
-			FormatSeconds(data.fPB, sRawPB, sizeof(sRawPB), true);
-			col = gI_HUDColors[client][Color_PB];
-			if (col != -1) Format(sPB, sizeof(sPB), "<span color='#%06X'>%s</span>", col, sRawPB);
-			else strcopy(sPB, sizeof(sPB), sRawPB);
-			
-			// Show PB rank if HUD2_RANK is not disabled
-			if (!(data.iHUD2Settings & HUD2_RANK)) {
-				// Fix: Use PB time for rank, not current time (data.iRank is live rank)
-				int iPBRank = Shavit_GetRankForTime(data.iStyle, data.fPB, data.iTrack);
-				
-				// Apply Rank Color
-				col = gI_HUDColors[client][Color_Rank];
-				if (col != -1) Format(sPBRankText, sizeof(sPBRankText), " (<span color='#%06X'>#%d</span>)", col, iPBRank);
-				else Format(sPBRankText, sizeof(sPBRankText), " (#%d)", iPBRank);
-			}
-		} else {
-			sPB = "N/A";
+		char sPBRankText[64];
+		sPBRankText[0] = '\0';
+		char sRawPB[32];
+		FormatSeconds(data.fPB, sRawPB, sizeof(sRawPB), true);
+		col = gI_HUDColors[client][Color_PB];
+		if (col != -1) Format(sPB, sizeof(sPB), "<span color='#%06X'>%s</span>", col, (data.fPB > 0.0 ? sRawPB : "N/A"));
+		else strcopy(sPB, sizeof(sPB), (data.fPB > 0.0 ? sRawPB : "N/A"));
+		if (gB_WR && data.fPB > 0.0 && !(data.iHUD2Settings & HUD2_RANK)) {
+			int iPBRank = Shavit_GetRankForTime(data.iStyle, data.fPB, data.iTrack);
+			col = gI_HUDColors[client][Color_Rank];
+			if (col != -1) Format(sPBRankText, sizeof(sPBRankText), " (<span color='#%06X'>#%d</span>)", col, iPBRank);
+			else Format(sPBRankText, sizeof(sPBRankText), " (#%d)", iPBRank);
 		}
-			
-		if (data.fWR > 0.0) {
-			char sRawWR[32];
-			FormatSeconds(data.fWR, sRawWR, sizeof(sRawWR), true);
-			
-			col = gI_HUDColors[client][Color_WR];
-			if (col != -1) Format(sWR, sizeof(sWR), "<span color='#%06X'>%s</span>", col, sRawWR);
-			else strcopy(sWR, sizeof(sWR), sRawWR);
-		} else {
-			sWR = "N/A";
-		}
-			
-		// 改回空格分隔
-		FormatEx(sLine, 128, "PB: %s%s     WR: %s", sPB, sPBRankText, sWR);
+		char sRawWR[32];
+		FormatSeconds(data.fWR, sRawWR, sizeof(sRawWR), true);
+		col = gI_HUDColors[client][Color_WR];
+		if (col != -1) Format(sWR, sizeof(sWR), "<span color='#%06X'>%s</span>", col, (data.fWR > 0.0 ? sRawWR : "N/A"));
+		else strcopy(sWR, sizeof(sWR), (data.fWR > 0.0 ? sRawWR : "N/A"));
+		FormatEx(sLine, 128, "PB: %s%s   WR: %s", sPB, sPBRankText, sWR);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 	}
-	
 	
 	// -------------------------------------------------------------------------
 	// NEW LINE 4: 跳跃: xx   [间隔]   平移: xx (同步) (Was Line 3)
@@ -2515,7 +2495,7 @@ void UpdateMainHUD(int client)
 			else
 			{
 				// FIX: Don't call Shavit_GetWorldRecord if shavit-wr is missing.
-				huddata.fWR = gB_WR ? Shavit_GetWorldRecord(0, huddata.iTrack) : 0.0;
+				// huddata.fWR = gB_WR ? Shavit_GetWorldRecord(0, huddata.iTrack) : 0.0;
 				huddata.fClosestReplayTime = Shavit_GetClosestReplayTime(target, huddata.fClosestReplayLength);
 			}
 		}
