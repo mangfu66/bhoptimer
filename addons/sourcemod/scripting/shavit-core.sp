@@ -28,6 +28,7 @@
 #include <dhooks>
 
 #define DEBUG 0
+#define CONVAR_FLOAT_EPSILON 0.001  // Epsilon for float comparison in cache checks
 
 #include <shavit/core>
 
@@ -176,6 +177,14 @@ float gF_ZoneAiraccelerate[MAXPLAYERS+1];
 float gF_ZoneSpeedLimit[MAXPLAYERS+1];
 float gF_ZoneStartSpeedLimit[MAXPLAYERS+1];
 int gI_LastPrintedSteamID[MAXPLAYERS+1];
+
+// Cache for ReplicateToClient optimization (to reduce FPS drops in spawn zones)
+float gF_CachedAiraccelerate[MAXPLAYERS+1];
+bool gB_CachedAiraccelerate_Valid[MAXPLAYERS+1];
+bool gB_CachedAutoBhop[MAXPLAYERS+1];
+bool gB_CachedAutoBhop_Valid[MAXPLAYERS+1];
+bool gB_CachedEnableBhop[MAXPLAYERS+1];
+bool gB_CachedEnableBhop_Valid[MAXPLAYERS+1];
 
 // kz support
 bool gB_KZMap[TRACKS_SIZE];
@@ -409,14 +418,8 @@ public void OnPluginStart()
 
 	sv_accelerate = FindConVar("sv_accelerate");
 	sv_airaccelerate = FindConVar("sv_airaccelerate");
-	sv_airaccelerate.Flags &= ~(FCVAR_NOTIFY | FCVAR_REPLICATED);
 
 	sv_enablebunnyhopping = FindConVar("sv_enablebunnyhopping");
-
-	if(sv_enablebunnyhopping != null)
-	{
-		sv_enablebunnyhopping.Flags &= ~(FCVAR_NOTIFY | FCVAR_REPLICATED);
-	}
 
 	sv_friction = FindConVar("sv_friction");
 
@@ -451,9 +454,6 @@ public void OnPluginStart()
 
 public void OnPluginEnd()
 {
-	if (sv_enablebunnyhopping != null)
-		sv_enablebunnyhopping.Flags |= (FCVAR_REPLICATED | FCVAR_NOTIFY);
-	sv_airaccelerate.Flags |= (FCVAR_REPLICATED | FCVAR_NOTIFY);
 }
 
 public void OnAdminMenuCreated(Handle topmenu)
@@ -2782,6 +2782,11 @@ void StopTimer(int client)
 	gA_Timers[client].iStrafes = 0;
 	gA_Timers[client].iTotalMeasures = 0;
 	gA_Timers[client].iGoodGains = 0;
+	
+	// Invalidate ConVar cache on timer stop (death/respawn)
+	gB_CachedAiraccelerate_Valid[client] = false;
+	gB_CachedAutoBhop_Valid[client] = false;
+	gB_CachedEnableBhop_Valid[client] = false;
 }
 
 void PauseTimer(int client)
@@ -2818,6 +2823,10 @@ void ResumeTimer(int client)
 
 public void OnClientDisconnect(int client)
 {
+	// Invalidate ConVar cache on disconnect
+	gB_CachedAiraccelerate_Valid[client] = false;
+	gB_CachedAutoBhop_Valid[client] = false;
+	gB_CachedEnableBhop_Valid[client] = false;
 	RequestFrame(StopTimer, client);
 }
 
@@ -3060,7 +3069,7 @@ public void Shavit_OnEnterZone(int client, int type, int track, int id, int enti
 	if (type == Zone_Start && track == gA_Timers[client].iTimerTrack)
 	{
 		gF_ZoneStartSpeedLimit[client] = float(data);
-		return; // <--- 添加这行：处理完起点数据后直接返回，不要发送网络消息
+		// With caching system, no need for early return - UpdateStyleSettings won't replicate if values unchanged
 	}
 	else if (type == Zone_Airaccelerate && track == gA_Timers[client].iTimerTrack)
 	{
@@ -3083,8 +3092,9 @@ public void Shavit_OnLeaveZone(int client, int type, int track, int id, int enti
 	if (track != gA_Timers[client].iTimerTrack)
 		return;
 	
-	// 移除了 && type != Zone_Start。现在如果是 Zone_Start，会直接 return，不再发送消息
-	if (type != Zone_Airaccelerate && type != Zone_CustomSpeedLimit && type != Zone_Autobhop)
+	// Call UpdateStyleSettings for zones that may affect ConVars
+	// Original shavit behavior restored - caching prevents unnecessary replications
+	if (type != Zone_Airaccelerate && type != Zone_CustomSpeedLimit && type != Zone_Autobhop && type != Zone_Start)
 		return;
 
 	UpdateStyleSettings(client);
@@ -4025,37 +4035,62 @@ void StopTimer_Cheat(int client, const char[] message)
 
 void UpdateAiraccelerate(int client, float airaccelerate)
 {
+	// Check cache to avoid unnecessary ReplicateToClient calls (FPS optimization)
+	// Use epsilon comparison for float values to avoid precision issues
+	if (gB_CachedAiraccelerate_Valid[client] && FloatAbs(gF_CachedAiraccelerate[client] - airaccelerate) < CONVAR_FLOAT_EPSILON)
+	{
+		return; // Value unchanged, skip replication
+	}
+
 	char sAiraccelerate[8];
 	FloatToString(airaccelerate, sAiraccelerate, 8);
 	sv_airaccelerate.ReplicateToClient(client, sAiraccelerate);
+	
+	// Update cache
+	gF_CachedAiraccelerate[client] = airaccelerate;
+	gB_CachedAiraccelerate_Valid[client] = true;
 }
 
 void UpdateStyleSettings(int client)
 {
 	if(sv_autobunnyhopping != null)
 	{
-		sv_autobunnyhopping.ReplicateToClient(client,
+		bool autobhop = (
+			gB_Auto[client]
+			&&
 			(
-				gB_Auto[client]
-				&&
-				(
-					GetStyleSettingBool(gA_Timers[client].bsStyle, "autobhop")
-				    || (gB_Zones && Shavit_InsideZone(client, Zone_Autobhop, gA_Timers[client].iTimerTrack))
-				)
+				GetStyleSettingBool(gA_Timers[client].bsStyle, "autobhop")
+			    || (gB_Zones && Shavit_InsideZone(client, Zone_Autobhop, gA_Timers[client].iTimerTrack))
 			)
-			? "1":"0"
 		);
+		
+		// Check cache to avoid unnecessary ReplicateToClient calls (FPS optimization)
+		if (!gB_CachedAutoBhop_Valid[client] || gB_CachedAutoBhop[client] != autobhop)
+		{
+			sv_autobunnyhopping.ReplicateToClient(client, autobhop ? "1":"0");
+			gB_CachedAutoBhop[client] = autobhop;
+			gB_CachedAutoBhop_Valid[client] = true;
+		}
 	}
 
 	if(sv_enablebunnyhopping != null)
 	{
+		bool enablebhop = false;
 		if (gB_Zones && Shavit_InsideZone(client, Zone_CustomSpeedLimit, gA_Timers[client].iTimerTrack))
 		{
-			sv_enablebunnyhopping.ReplicateToClient(client, "1");
+			enablebhop = true;
 		}
 		else
 		{
-			sv_enablebunnyhopping.ReplicateToClient(client, (GetStyleSettingBool(gA_Timers[client].bsStyle, "bunnyhopping"))? "1":"0");
+			enablebhop = GetStyleSettingBool(gA_Timers[client].bsStyle, "bunnyhopping");
+		}
+		
+		// Check cache to avoid unnecessary ReplicateToClient calls (FPS optimization)
+		if (!gB_CachedEnableBhop_Valid[client] || gB_CachedEnableBhop[client] != enablebhop)
+		{
+			sv_enablebunnyhopping.ReplicateToClient(client, enablebhop ? "1":"0");
+			gB_CachedEnableBhop[client] = enablebhop;
+			gB_CachedEnableBhop_Valid[client] = true;
 		}
 	}
 
