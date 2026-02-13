@@ -411,11 +411,19 @@ public int TagTeamMenu_Handler(Menu menu, MenuAction action, int param1, int par
 		}
 		else if (StrEqual(info, "tele"))
 		{
-			cp_cache_t cpcache;
-			if (Shavit_GetCheckpoint(param1, 1, cpcache, sizeof(cp_cache_t)))
+			// [FIX] 增加安全检查：确保玩家在真正点击菜单时依然有存档，防止异步报错
+			if (Shavit_GetTotalCheckpoints(param1) > 0)
 			{
-				Shavit_LoadCheckpointCache(param1, cpcache, 1, sizeof(cp_cache_t), true); 
-				Shavit_ResumeTimer(param1);
+				cp_cache_t cpcache;
+				if (Shavit_GetCheckpoint(param1, 1, cpcache, sizeof(cp_cache_t)))
+				{
+					Shavit_LoadCheckpointCache(param1, cpcache, 1, sizeof(cp_cache_t), true); 
+					Shavit_ResumeTimer(param1);
+				}
+			}
+			else
+			{
+				Shavit_PrintToChat(param1, " \x04[TagTeam]\x01 传送失败，找不到你的存档。");
 			}
 			OpenTagTeamMenu(param1);
 		}
