@@ -377,6 +377,13 @@ public void OnPluginStart()
 
 	HookEvent("player_spawn", Player_Spawn);
 
+	// Initialize arrays to prevent undefined behavior
+	for (int i = 0; i <= MaxClients; i++)
+	{
+		gI_ZoneSpeedLimit[i] = 0;
+		gF_ConnectTime[i] = 0.0;
+	}
+	
 	if(gB_Late)
 	{
 		Shavit_OnStyleConfigLoaded(Shavit_GetStyleCount());
@@ -399,6 +406,12 @@ public void OnPluginStart()
 	// DB Connect (Fix for missing Shavit_GetDb)
 	// We connect to "shavit" conf which is the standard
 	Database.Connect(SQL_ConnectCallback, "shavit");
+}
+
+public void OnPluginEnd()
+{
+	// Clean up resources to prevent memory leaks
+	delete gSM_WRNames;
 }
 
 // SQL Caching Implementation
@@ -473,8 +486,11 @@ void GetCachedWRName(int style, int track, char[] buffer, int maxlen)
 		gSM_WRNames.SetString(sKey, "Loading...");
 		
 		// [FIX] Updated SQL query to JOIN with users table to get the name
+		char sEscapedMap[PLATFORM_MAX_PATH*2+1];
+		gH_SQL.Escape(gS_CurrentMap, sEscapedMap, sizeof(sEscapedMap));
+		
 		char query[512];
-		Format(query, sizeof(query), "SELECT u.name FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE p.style = %d AND p.track = %d AND p.map = '%s' ORDER BY p.time ASC LIMIT 1", gS_MySQLPrefix, gS_MySQLPrefix, style, track, gS_CurrentMap);
+		Format(query, sizeof(query), "SELECT u.name FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE p.style = %d AND p.track = %d AND p.map = '%s' ORDER BY p.time ASC LIMIT 1", gS_MySQLPrefix, gS_MySQLPrefix, style, track, sEscapedMap);
 		
 		DataPack pack = new DataPack();
 		pack.WriteCell(style);
@@ -622,6 +638,7 @@ public void OnClientPutInServer(int client)
 	gI_ScrollCount[client] = 0;
 	gB_FirstPrint[client] = false;
 	gB_AlternateCenterKeys[client] = false;
+	gF_ConnectTime[client] = GetEngineTime(); // Initialize connection time
 	
 	// Reset Colors
 	for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
@@ -660,11 +677,17 @@ public Action Timer_QueryWindowsCvar(Handle timer, any data)
 
 public void OnWindowsCvarQueried(QueryCookie cookie, int client, ConVarQueryResult result, const char[] cvarName, const char[] cvarValue, any value)
 {
+	if (!(1 <= client <= MaxClients))
+		return;
+		
 	gB_AlternateCenterKeys[client] = (result == ConVarQuery_NotFound);
 }
 
 public void BotPostThinkPost(int client)
 {
+	if (!(1 <= client <= MaxClients))
+		return;
+		
 	int buttons = GetClientButtons(client);
 
 	float ang[3];
@@ -718,14 +741,19 @@ public void OnClientCookiesCached(int client)
 	if (sColors[0] != '\0')
 	{
 		char sExploded[HUD_COLOR_COUNT][16];
-		ExplodeString(sColors, ";", sExploded, view_as<int>(HUD_COLOR_COUNT), 16);
-		for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
+		int iCount = ExplodeString(sColors, ";", sExploded, view_as<int>(HUD_COLOR_COUNT), 16);
+		
+		// Validate parsed cookie data
+		if (iCount >= view_as<int>(HUD_COLOR_COUNT))
+		{
+			for (int i = 0; i < view_as<int>(HUD_COLOR_COUNT); i++)
 		{
 			if (strcmp(sExploded[i], "def") == 0 || sExploded[i][0] == '\0') {
 				gI_HUDColors[client][i] = -1;
 			} else {
 				gI_HUDColors[client][i] = StringToInt(sExploded[i], 16);
 			}
+		}
 		}
 	}
 	
@@ -826,6 +854,14 @@ void FillerHintText(int client)
 	PrintHintText(client, "...");
 	gF_ConnectTime[client] = GetEngineTime();
 	gB_FirstPrint[client] = true;
+}
+
+public void OnClientDisconnect(int client)
+{
+	// Clean up client-specific data
+	gF_ConnectTime[client] = 0.0;
+	gI_ZoneSpeedLimit[client] = 0;
+	gB_FirstPrint[client] = false;
 }
 
 void ToggleHUD(int client, int hud, bool chat)
@@ -1344,6 +1380,12 @@ public int MenuHandler_HUD(Menu menu, MenuAction action, int param1, int param2)
 
 			IntToString(gI_HUDSettings[param1], sCookie, 16);
 			SetClientCookie(param1, gH_HUDCookie, sCookie);
+			
+			// Bug 3 Fix: Immediately apply pistol change if toggling HUD_USP
+			if (iSelection == HUD_USP && IsPlayerAlive(param1) && gEV_Type != Engine_TF2)
+			{
+				GivePlayerDefaultGun(param1);
+			}
 		}
 
 		if(gEV_Type == Engine_TF2 && iSelection == HUD_CENTER && (gI_HUDSettings[param1] & HUD_MASTER) > 0)
@@ -1492,6 +1534,34 @@ void GivePlayerDefaultGun(int client)
 
 	iWeapon = (gEV_Type == Engine_CSGO) ? GiveSkinnedWeapon(client, sWeapon) : GivePlayerItem(client, sWeapon);
 	FakeClientCommand(client, "use %s", sWeapon);
+	
+	// Bug 4 Fix: Explicitly apply burst/silencer settings after giving weapon
+	if (iWeapon != -1 && IsValidEntity(iWeapon))
+	{
+		if (StrEqual(sWeapon, "weapon_glock"))
+		{
+			// HUD2 uses inverted logic: bit NOT set = feature enabled
+			// Apply burst mode if HUD2_GLOCKBURST bit is NOT set
+			if (!(gI_HUD2Settings[client] & HUD2_GLOCKBURST))
+			{
+				SetEntProp(iWeapon, Prop_Send, "m_bBurstMode", 1);
+			}
+		}
+		else if (StrContains(sWeapon, "usp") != -1)
+		{
+			// HUD2 uses inverted logic: bit NOT set = feature enabled
+			// Apply silencer based on engine type:
+			// - CSGO: Apply if HUD2_USPSILENCER bit is NOT set
+			// - CSS: Apply if HUD2_USPSILENCER bit IS set (different default)
+			if ((!(gI_HUD2Settings[client] & HUD2_USPSILENCER)) != (gEV_Type == Engine_CSS))
+			{
+				int state = (gEV_Type == Engine_CSS) ? 1 : 0;
+				SetEntProp(iWeapon, Prop_Send, "m_bSilencerOn", state);
+				SetEntProp(iWeapon, Prop_Send, "m_weaponMode", state);
+				SetEntPropFloat(iWeapon, Prop_Send, "m_flDoneSwitchingSilencer", GetGameTime());
+			}
+		}
+	}
 }
 
 public void Player_Spawn(Event event, const char[] name, bool dontBroadcast)
@@ -1851,12 +1921,18 @@ int AddHUDToBuffer_Source2013(int client, huddata_t data, char[] buffer, int max
 				}
 				else
 				{
-					AddHUDLine(buffer, maxlen, gS_StyleStrings[data.iStyle].sStyleName, iLines);
+					if (data.iStyle >= 0 && data.iStyle < gI_Styles)
+					{
+						AddHUDLine(buffer, maxlen, gS_StyleStrings[data.iStyle].sStyleName, iLines);
+					}
 				}
 			}
 			else
 			{
-				AddHUDLine(buffer, maxlen, gS_StyleStrings[data.iStyle].sStyleName, iLines);
+				if (data.iStyle >= 0 && data.iStyle < gI_Styles)
+				{
+					AddHUDLine(buffer, maxlen, gS_StyleStrings[data.iStyle].sStyleName, iLines);
+				}
 			}
 		}
 
@@ -1953,7 +2029,7 @@ int AddHUDToBuffer_Source2013(int client, huddata_t data, char[] buffer, int max
 			}
 			else
 			{
-				FormatEx(sLine, 128, "%T", "HudCustomSpeedLimit", client, gI_ZoneSpeedLimit[data.iTarget]);
+				FormatEx(sLine, sizeof(sLine), "%T", "HudCustomSpeedLimit", client, gI_ZoneSpeedLimit[data.iTarget]);
 			}
 
 			AddHUDLine(buffer, maxlen, sLine, iLines);
@@ -1965,7 +2041,7 @@ int AddHUDToBuffer_Source2013(int client, huddata_t data, char[] buffer, int max
 		float progress = ((data.fTime - (data.fTime - data.fClosestReplayTime)) / data.fWR) * 100.0;
 		if(progress > 99.9)
 			progress = 99.9;
-		FormatEx(sLine, 128, "Progress: %.1f％", progress);
+		FormatEx(sLine, sizeof(sLine), "Progress: %.1f％", progress);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 	}
 
@@ -1984,14 +2060,17 @@ int AddHUDToBuffer_Source2013(int client, huddata_t data, char[] buffer, int max
 int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 {
 	int iLines = 0;
-	char sLine[128];
+	char sLine[256]; // Increased from 128 to 256
 	
 	// Helper to colorize
 	int col;
 
 	// 使用 size=xxx 字体 (默认 18)
 	int fontSize = gI_HudFontSize[client];
-	if (fontSize < 12) fontSize = 12; // Min limit
+	if (fontSize < 12)
+		fontSize = 12; // Min limit
+	else if (fontSize > 72)
+		fontSize = 72; // Max limit
 	
 	char sHeader[64];
 	Format(sHeader, sizeof(sHeader), "<font size='%d'><pre>", fontSize);
@@ -2024,7 +2103,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		if (zoneColor == -1) zoneColor = ((gI_Gradient.r << 16) + (gI_Gradient.g << 8) + (gI_Gradient.b));
 		
 		FormatEx(sLine, sizeof(sLine),
-			"<span color='#%06X'>%T</span>",
+			"<font color='#%06X'>%T</font>",
 			zoneColor,
 			(data.iZoneHUD == ZoneHUD_Start) ? "HudInStartZoneCSGO" : "HudInEndZoneCSGO",
 			client,
@@ -2043,11 +2122,11 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		// Style Name
 		if (data.iStyle >= 0 && data.iStyle < gI_Styles)
 		{
-			FormatEx(sLine, 128, "<span color='#%s'>%s</span>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
+			FormatEx(sLine, sizeof(sLine), "<font color='#%s'>%s</font>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
 		}
 		else
 		{
-			FormatEx(sLine, 128, "Unknown Style");
+			FormatEx(sLine, sizeof(sLine), "Unknown Style");
 		}
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
@@ -2057,17 +2136,17 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 			// Color Logic for Tier
 			col = gI_HUDColors[client][Color_MapTier];
 			if (col != -1) {
-				FormatEx(sLine, 128, "<span color='#%06X'>%T</span>", col, "HudZoneTier", client, data.iMapTier);
+				FormatEx(sLine, sizeof(sLine), "<font color='#%06X'>%T</font>", col, "HudZoneTier", client, data.iMapTier);
 			} else {
-				FormatEx(sLine, 128, "%T", "HudZoneTier", client, data.iMapTier);
+				FormatEx(sLine, sizeof(sLine), "%T", "HudZoneTier", client, data.iMapTier);
 			}
 			AddHUDLine(buffer, maxlen, sLine, iLines);
 		}
 		
 		// Speed
 		col = gI_HUDColors[client][Color_Speed];
-		if (col != -1) FormatEx(sLine, 128, "<span color='#%06X'>%d u/s</span>", col, data.iSpeed);
-		else FormatEx(sLine, 128, "%d u/s", data.iSpeed);
+		if (col != -1) FormatEx(sLine, sizeof(sLine), "<font color='#%06X'>%d u/s</font>", col, data.iSpeed);
+		else FormatEx(sLine, sizeof(sLine), "%d u/s", data.iSpeed);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
 		StrCat(buffer, maxlen, "</pre></font>");
@@ -2080,7 +2159,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		// [修复] 如果样式为 -1 (Bot空闲/未加载)，直接显示无数据并返回，防止崩溃
 		if (data.iStyle < 0 || data.iStyle >= gI_Styles)
 		{
-			FormatEx(sLine, 128, "No Replay Data");
+			FormatEx(sLine, sizeof(sLine), "No Replay Data");
 			AddHUDLine(buffer, maxlen, sLine, iLines);
 			StrCat(buffer, maxlen, "</pre></font>");
 			return iLines;
@@ -2090,23 +2169,23 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		// Line 1: Time | Speed
 		char sTime[32];
 		FormatSeconds(data.fTime, sTime, 32, false);
-		FormatEx(sLine, 128, "%s   %d u/s", sTime, data.iSpeed);
+		FormatEx(sLine, sizeof(sLine), "%s   %d u/s", sTime, data.iSpeed);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
 		// Line 2: Replay Name
 		char sPlayerName[MAX_NAME_LENGTH];
 		Shavit_GetReplayCacheName(data.iTarget, sPlayerName, sizeof(sPlayerName));
-		FormatEx(sLine, 128, "%s", sPlayerName);
+		FormatEx(sLine, sizeof(sLine), "%s", sPlayerName);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
 		// Line 3: WR Time (Total Length)
 		char sWR[32];
 		FormatSeconds(data.fWR, sWR, 32, false);
-		FormatEx(sLine, 128, "Total: %s (%.1f%%)", sWR, ((data.fTime / data.fWR) * 100));
+		FormatEx(sLine, sizeof(sLine), "Total: %s (%.1f%%)", sWR, ((data.fTime / data.fWR) * 100));
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
 		// Line 4: Style
-		FormatEx(sLine, 128, "<span color='#%s'>%s</span> | Replay", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
+		FormatEx(sLine, sizeof(sLine), "<font color='#%s'>%s</font> | Replay", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 		
 		StrCat(buffer, maxlen, "</pre></font>");
@@ -2173,7 +2252,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 	
 	if (!(data.iHUD2Settings & HUD2_STYLE)) {
 		if (data.iStyle >= 0 && data.iStyle < gI_Styles) {
-			FormatEx(sStyleNameBuf, sizeof(sStyleNameBuf), "<span color='#%s'>%s</span>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
+			FormatEx(sStyleNameBuf, sizeof(sStyleNameBuf), "<font color='#%s'>%s</font>", gS_StyleStrings[data.iStyle].sHTMLColor, gS_StyleStrings[data.iStyle].sStyleName);
 		} else {
 			sStyleNameBuf = "Unknown";
 		}
@@ -2208,7 +2287,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		char sRawTime[32];
 		FormatSeconds(data.fTime, sRawTime, 32, false);
 		
-		if (col != -1) Format(sTime, sizeof(sTime), "<span color='#%06X'>%s</span>", col, sRawTime);
+		if (col != -1) Format(sTime, sizeof(sTime), "<font color='#%06X'>%s</font>", col, sRawTime);
 		else strcopy(sTime, sizeof(sTime), sRawTime);
 		
 		if (data.fClosestReplayTime != -1.0 && !(data.iHUD2Settings & HUD2_TIMEDIFFERENCE)) {
@@ -2218,7 +2297,7 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 			
 			// 绿色为快 (-)，红色为慢 (+)
 			int diffColor = (fDifference <= 0.0) ? 0x00FF00 : 0xFF0000;
-			Format(sTimeDiff, sizeof(sTimeDiff), " (<span color='#%06X'>%s%s</span>)", diffColor, (fDifference >= 0.0) ? "+" : "", sDiffVal);
+			Format(sTimeDiff, sizeof(sTimeDiff), " (<font color='#%06X'>%s%s</font>)", diffColor, (fDifference >= 0.0) ? "+" : "", sDiffVal);
 		} else {
 			sTimeDiff[0] = '\0';
 		}
@@ -2232,19 +2311,19 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 			float res = data.fClosestVelocityDifference;
 			// 绿色为快 (+)，红色为慢 (-)
 			int velColor = (res >= 0.0) ? 0x00FF00 : 0xFF0000;
-			Format(sVelDiff, sizeof(sVelDiff), " (<span color='#%06X'>%s%.0f</span>)", velColor, (res >= 0.0) ? "+" : "", res);
+			Format(sVelDiff, sizeof(sVelDiff), " (<font color='#%06X'>%s%.0f</font>)", velColor, (res >= 0.0) ? "+" : "", res);
 		} else {
 			sVelDiff[0] = '\0';
 		}
 		
 		col = gI_HUDColors[client][Color_Speed];
-		if (col != -1) Format(sSpeedPart, sizeof(sSpeedPart), "<span color='#%06X'>%d u/s</span>%s", col, data.iSpeed, sVelDiff);
+		if (col != -1) Format(sSpeedPart, sizeof(sSpeedPart), "<font color='#%06X'>%d u/s</font>%s", col, data.iSpeed, sVelDiff);
 		else Format(sSpeedPart, sizeof(sSpeedPart), "%d u/s%s", data.iSpeed, sVelDiff);
 	}
 	
 	// Combine Line 2
 	if (sTimePart[0] != '\0' && sSpeedPart[0] != '\0') {
-		FormatEx(sLine, 128, "%s     %s", sTimePart, sSpeedPart);
+		FormatEx(sLine, sizeof(sLine), "%s     %s", sTimePart, sSpeedPart);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 	} else if (sTimePart[0] != '\0') {
 		AddHUDLine(buffer, maxlen, sTimePart, iLines);
@@ -2266,20 +2345,20 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		char sRawPB[32];
 		FormatSeconds(data.fPB, sRawPB, sizeof(sRawPB), true);
 		col = gI_HUDColors[client][Color_PB];
-		if (col != -1) Format(sPB, sizeof(sPB), "<span color='#%06X'>%s</span>", col, (data.fPB > 0.0 ? sRawPB : "N/A"));
+		if (col != -1) Format(sPB, sizeof(sPB), "<font color='#%06X'>%s</font>", col, (data.fPB > 0.0 ? sRawPB : "N/A"));
 		else strcopy(sPB, sizeof(sPB), (data.fPB > 0.0 ? sRawPB : "N/A"));
 		if (gB_WR && data.fPB > 0.0 && !(data.iHUD2Settings & HUD2_RANK)) {
 			int iPBRank = Shavit_GetRankForTime(data.iStyle, data.fPB, data.iTrack);
 			col = gI_HUDColors[client][Color_Rank];
-			if (col != -1) Format(sPBRankText, sizeof(sPBRankText), " (<span color='#%06X'>#%d</span>)", col, iPBRank);
+			if (col != -1) Format(sPBRankText, sizeof(sPBRankText), " (<font color='#%06X'>#%d</font>)", col, iPBRank);
 			else Format(sPBRankText, sizeof(sPBRankText), " (#%d)", iPBRank);
 		}
 		char sRawWR[32];
 		FormatSeconds(data.fWR, sRawWR, sizeof(sRawWR), true);
 		col = gI_HUDColors[client][Color_WR];
-		if (col != -1) Format(sWR, sizeof(sWR), "<span color='#%06X'>%s</span>", col, (data.fWR > 0.0 ? sRawWR : "N/A"));
+		if (col != -1) Format(sWR, sizeof(sWR), "<font color='#%06X'>%s</font>", col, (data.fWR > 0.0 ? sRawWR : "N/A"));
 		else strcopy(sWR, sizeof(sWR), (data.fWR > 0.0 ? sRawWR : "N/A"));
-		FormatEx(sLine, 128, "PB: %s%s   WR: %s", sPB, sPBRankText, sWR);
+		FormatEx(sLine, sizeof(sLine), "PB: %s%s   WR: %s", sPB, sPBRankText, sWR);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 	}
 	
@@ -2287,8 +2366,8 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 	// NEW LINE 4: 跳跃: xx   [间隔]   平移: xx (同步) (Was Line 3)
 	// -------------------------------------------------------------------------
 	
-	char sJumpPart[128] = "";
-	char sStrafePart[128] = "";
+	char sJumpPart[256] = ""; // Increased from 128 to 256
+	char sStrafePart[256] = ""; // Increased from 128 to 256
 	
 	// Jumps Logic (Controlled by HUD2_JUMPS)
 	if (!(data.iHUD2Settings & HUD2_JUMPS)) {
@@ -2297,13 +2376,13 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		if (!Shavit_GetStyleSettingBool(data.iStyle, "autobhop") && (gI_HUDSettings[client] & HUD_PERFS_CENTER)) {
 			// Perfs included
 			if (col != -1) {
-				Format(sJumpPart, sizeof(sJumpPart), "Jumps: <span color='#%06X'>%d (%.1f%%)</span>", col, data.iJumps, Shavit_GetPerfectJumps(data.iTarget));
+				Format(sJumpPart, sizeof(sJumpPart), "Jumps: <font color='#%06X'>%d (%.1f%%)</font>", col, data.iJumps, Shavit_GetPerfectJumps(data.iTarget));
 			} else {
 				Format(sJumpPart, sizeof(sJumpPart), "Jumps: %d (%.1f%%)", data.iJumps, Shavit_GetPerfectJumps(data.iTarget));
 			}
 		} else {
 			if (col != -1) {
-				Format(sJumpPart, sizeof(sJumpPart), "Jumps: <span color='#%06X'>%d</span>", col, data.iJumps);
+				Format(sJumpPart, sizeof(sJumpPart), "Jumps: <font color='#%06X'>%d</font>", col, data.iJumps);
 			} else {
 				Format(sJumpPart, sizeof(sJumpPart), "Jumps: %d", data.iJumps);
 			}
@@ -2316,20 +2395,20 @@ int AddHUDToBuffer_CSGO(int client, huddata_t data, char[] buffer, int maxlen)
 		// Sync is controlled by HUD2_SYNC
 		col = gI_HUDColors[client][Color_Sync];
 		if (!(data.iHUD2Settings & HUD2_SYNC) && data.fSync >= 0.0) {
-			if (col != -1) Format(sSync, sizeof(sSync), " (<span color='#%06X'>%.1f%%</span>)", col, data.fSync);
+			if (col != -1) Format(sSync, sizeof(sSync), " (<font color='#%06X'>%.1f%%</font>)", col, data.fSync);
 			else Format(sSync, sizeof(sSync), " (%.1f%%)", data.fSync);
 		} else {
 			sSync[0] = '\0';
 		}
 		
 		col = gI_HUDColors[client][Color_Strafes];
-		if (col != -1) Format(sStrafePart, sizeof(sStrafePart), "Strafes: <span color='#%06X'>%d</span>%s", col, data.iStrafes, sSync);
+		if (col != -1) Format(sStrafePart, sizeof(sStrafePart), "Strafes: <font color='#%06X'>%d</font>%s", col, data.iStrafes, sSync);
 		else Format(sStrafePart, sizeof(sStrafePart), "Strafes: %d%s", data.iStrafes, sSync);
 	}
 	
 	// Combine Line 4
 	if (sJumpPart[0] != '\0' && sStrafePart[0] != '\0') {
-		FormatEx(sLine, 128, "%s     %s", sJumpPart, sStrafePart);
+		FormatEx(sLine, sizeof(sLine), "%s     %s", sJumpPart, sStrafePart);
 		AddHUDLine(buffer, maxlen, sLine, iLines);
 	} else if (sJumpPart[0] != '\0') {
 		AddHUDLine(buffer, maxlen, sJumpPart, iLines);

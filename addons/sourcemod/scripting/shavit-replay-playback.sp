@@ -1952,10 +1952,10 @@ bool DefaultLoadReplay(frame_cache_t cache, int style, int track)
 	return true;
 }
 
-bool DeleteReplay(int style, int track, int accountid, const char[] mapname)
+bool DeleteReplay(int style, int track, int accountid, const char[] mapname, int rank = 1)
 {
 	char sPath[PLATFORM_MAX_PATH];
-	Shavit_GetReplayFilePath(style, track, mapname, gS_ReplayFolder, sPath);
+	Shavit_GetReplayFilePathForRank(style, track, rank, mapname, gS_ReplayFolder, sPath);
 
 	if(!FileExists(sPath))
 	{
@@ -1985,12 +1985,45 @@ bool DeleteReplay(int style, int track, int accountid, const char[] mapname)
 		return false;
 	}
 
+	// Auto-promote Top-N replays after deletion
+	PromoteTopNReplaysFromRank(style, track, mapname, rank);
+
 	if(StrEqual(mapname, gS_Map, false))
 	{
 		UnloadReplay(style, track, false, false);
 	}
 
 	return true;
+}
+
+// Auto-promote Top-N replays after a deletion
+void PromoteTopNReplaysFromRank(int style, int track, const char[] mapname, int deletedRank)
+{
+	// Shift all replays up from the deleted rank (e.g., rank 3 → rank 2, rank 4 → rank 3, etc.)
+	for (int rank = deletedRank + 1; rank <= 5; rank++)
+	{
+		char sOldPath[PLATFORM_MAX_PATH], sNewPath[PLATFORM_MAX_PATH];
+		Shavit_GetReplayFilePathForRank(style, track, rank, mapname, gS_ReplayFolder, sOldPath);
+		Shavit_GetReplayFilePathForRank(style, track, rank - 1, mapname, gS_ReplayFolder, sNewPath);
+		
+		if (FileExists(sOldPath))
+		{
+			// Delete the target file if it exists
+			if (FileExists(sNewPath))
+			{
+				DeleteFile(sNewPath);
+			}
+			
+			// Rename (move) the file
+			RenameFile(sNewPath, sOldPath);
+		}
+	}
+	
+	// Reload the replay cache if this is for the current map
+	if (StrEqual(mapname, gS_Map, false))
+	{
+		UnloadReplay(style, track, true, false);
+	}
 }
 
 public void SQL_GetUserName_Botref_Callback(Database db, DBResultSet results, const char[] error, int botref)
@@ -2029,6 +2062,251 @@ public void SQL_GetUserName_Callback(Database db, DBResultSet results, const cha
 	{
 		results.FetchString(0, gA_FrameCache[style][track].sReplayName, MAX_NAME_LENGTH);
 	}
+}
+
+public void SQL_GetReplayRankNames_Callback(Database db, DBResultSet results, const char[] error, DataPack data)
+{
+	data.Reset();
+	int client = GetClientFromSerial(data.ReadCell());
+	int style = data.ReadCell();
+	int track = data.ReadCell();
+	
+	// Read rank data from DataPack
+	ArrayList rankData = view_as<ArrayList>(data.ReadCell());
+	delete data;
+	
+	if (!IsValidClient(client))
+	{
+		delete rankData;
+		return;
+	}
+	
+	// Build a map of steamid -> name from SQL results
+	StringMap nameMap = new StringMap();
+	
+	if (results != null)
+	{
+		while (results.FetchRow())
+		{
+			int auth = results.FetchInt(0);
+			char name[MAX_NAME_LENGTH];
+			results.FetchString(1, name, sizeof(name));
+			
+			char sAuth[16];
+			IntToString(auth, sAuth, sizeof(sAuth));
+			nameMap.SetString(sAuth, name);
+		}
+	}
+	else
+	{
+		LogError("Timer error! Get replay rank names failed. Reason: %s", error);
+	}
+	
+	// Build the menu
+	char sTrack[32];
+	GetTrackName(client, track, sTrack, 32);
+	
+	Menu menu = new Menu(MenuHandler_ReplayRank);
+	menu.SetTitle("%T - %s (%s)\n ", "Menu_SelectRank", client, gS_StyleStrings[style].sStyleName, sTrack);
+	
+	// Process each rank
+	for (int i = 0; i < rankData.Length; i++)
+	{
+		// Each entry in rankData contains: [rank, steamid, time_as_float]
+		int rank = rankData.Get(i, 0);
+		int steamid = rankData.Get(i, 1);
+		float fTime = view_as<float>(rankData.Get(i, 2));
+		
+		char sTime[32];
+		FormatSeconds(fTime, sTime, sizeof(sTime), false);
+		
+		char sDisplay[128];
+		char sName[MAX_NAME_LENGTH];
+		
+		// Get player name from WR system for rank 1
+		if (rank == 1 && Shavit_GetWRName(style, sName, sizeof(sName), track))
+		{
+			FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s (%s)", rank, sName, sTime);
+		}
+		// For rank 2+, get name from our query results
+		else if (steamid != 0)
+		{
+			char sAuth[16];
+			IntToString(steamid, sAuth, sizeof(sAuth));
+			
+			// Try to get from database query first
+			if (nameMap.GetString(sAuth, sName, sizeof(sName)))
+			{
+				FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s (%s)", rank, sName, sTime);
+			}
+			// Check if player is currently online as fallback
+			else
+			{
+				bool foundOnline = false;
+				for (int j = 1; j <= MaxClients; j++)
+				{
+					if (IsClientInGame(j) && !IsFakeClient(j) && GetSteamAccountID(j) == steamid)
+					{
+						GetClientName(j, sName, sizeof(sName));
+						FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s (%s)", rank, sName, sTime);
+						foundOnline = true;
+						break;
+					}
+				}
+				
+				if (!foundOnline)
+				{
+					FormatEx(sDisplay, sizeof(sDisplay), "#%d - [U:1:%d] (%s)", rank, steamid, sTime);
+				}
+			}
+		}
+		else
+		{
+			// No steamid in header
+			FormatEx(sDisplay, sizeof(sDisplay), "#%d - (%s)", rank, sTime);
+		}
+		
+		char sInfo[8];
+		IntToString(rank, sInfo, sizeof(sInfo));
+		menu.AddItem(sInfo, sDisplay);
+	}
+	
+	if (menu.ItemCount == 0)
+	{
+		menu.AddItem("-1", "No replays available");
+	}
+	
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+	
+	delete nameMap;
+	delete rankData;
+}
+
+public void SQL_GetDeleteReplayRankNames_Callback(Database db, DBResultSet results, const char[] error, DataPack data)
+{
+	data.Reset();
+	int client = GetClientFromSerial(data.ReadCell());
+	int style = data.ReadCell();
+	int track = data.ReadCell();
+	
+	// Read rank data from DataPack
+	ArrayList rankData = view_as<ArrayList>(data.ReadCell());
+	delete data;
+	
+	if (!IsValidClient(client))
+	{
+		delete rankData;
+		return;
+	}
+	
+	// Build a map of steamid -> name from SQL results
+	StringMap nameMap = new StringMap();
+	
+	if (results != null)
+	{
+		while (results.FetchRow())
+		{
+			int auth = results.FetchInt(0);
+			char name[MAX_NAME_LENGTH];
+			results.FetchString(1, name, sizeof(name));
+			
+			char sAuth[16];
+			IntToString(auth, sAuth, sizeof(sAuth));
+			nameMap.SetString(sAuth, name);
+		}
+	}
+	else
+	{
+		LogError("Timer error! Get delete replay rank names failed. Reason: %s", error);
+	}
+	
+	// Build the menu
+	char sTrack[32];
+	GetTrackName(client, track, sTrack, 32);
+	
+	Menu menu = new Menu(MenuHandler_DeleteReplayRank);
+	menu.SetTitle("%T - %s (%s)\n ", "Menu_SelectDeleteRank", client, gS_StyleStrings[style].sStyleName, sTrack);
+	
+	// Process each rank
+	for (int i = 0; i < rankData.Length; i++)
+	{
+		// Each entry in rankData contains: [rank, steamid, time_as_float]
+		int rank = rankData.Get(i, 0);
+		int steamid = rankData.Get(i, 1);
+		float fTime = view_as<float>(rankData.Get(i, 2));
+		
+		char sTime[32];
+		FormatSeconds(fTime, sTime, sizeof(sTime), false);
+		
+		char sDisplay[128];
+		char sName[MAX_NAME_LENGTH];
+		
+		// Get player name from WR system for rank 1
+		if (rank == 1 && Shavit_GetWRName(style, sName, sizeof(sName), track))
+		{
+			FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s (%s)", rank, sName, sTime);
+		}
+		// For rank 2+, get name from our query results
+		else if (steamid != 0)
+		{
+			char sAuth[16];
+			IntToString(steamid, sAuth, sizeof(sAuth));
+			
+			// Try to get from database query first
+			if (nameMap.GetString(sAuth, sName, sizeof(sName)))
+			{
+				FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s (%s)", rank, sName, sTime);
+			}
+			// Check if player is currently online as fallback
+			else
+			{
+				bool foundOnline = false;
+				for (int j = 1; j <= MaxClients; j++)
+				{
+					if (IsClientInGame(j) && !IsFakeClient(j) && GetSteamAccountID(j) == steamid)
+					{
+						GetClientName(j, sName, sizeof(sName));
+						FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s (%s)", rank, sName, sTime);
+						foundOnline = true;
+						break;
+					}
+				}
+				
+				if (!foundOnline)
+				{
+					FormatEx(sDisplay, sizeof(sDisplay), "#%d - [U:1:%d] (%s)", rank, steamid, sTime);
+				}
+			}
+		}
+		else
+		{
+			// No steamid in header
+			FormatEx(sDisplay, sizeof(sDisplay), "#%d - (%s)", rank, sTime);
+		}
+		
+		char sInfo[8];
+		IntToString(rank, sInfo, sizeof(sInfo));
+		menu.AddItem(sInfo, sDisplay);
+	}
+	
+	// Add "Delete All" option if we have items
+	if (menu.ItemCount > 0)
+	{
+		char sDeleteAll[64];
+		FormatEx(sDeleteAll, sizeof(sDeleteAll), "%T", "DeleteAll", client);
+		menu.AddItem("-1", sDeleteAll);
+	}
+	else
+	{
+		menu.AddItem("-1", "No replays available");
+	}
+	
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+	
+	delete nameMap;
+	delete rankData;
 }
 
 void ForceObserveProp(int client)
@@ -2957,29 +3235,56 @@ public int DeleteReplay_Callback(Menu menu, MenuAction action, int param1, int p
 		}
 
 		gI_MenuTrack[param1] = StringToInt(sExploded[1]);
+		gI_MenuStyle[param1] = style;
 
-		Menu submenu = new Menu(DeleteConfirmation_Callback);
-		submenu.SetTitle("%T", "ReplayDeletionConfirmation", param1, gS_StyleStrings[style].sStyleName);
-
-		char sMenuItem[64];
-
-		for(int i = 1; i <= GetRandomInt(2, 4); i++)
+		// Check if Top-N replays exist for this style/track
+		bool hasTopNReplays = false;
+		int replayCount = 0;
+		for (int rank = 1; rank <= 5; rank++)
 		{
-			FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
-			submenu.AddItem("-1", sMenuItem);
+			char sRankPath[PLATFORM_MAX_PATH];
+			Shavit_GetReplayFilePathForRank(style, gI_MenuTrack[param1], rank, gS_Map, gS_ReplayFolder, sRankPath);
+			if (FileExists(sRankPath))
+			{
+				replayCount++;
+				if (rank > 1)
+				{
+					hasTopNReplays = true;
+				}
+			}
 		}
 
-		FormatEx(sMenuItem, 64, "%T", "MenuResponseYes", param1);
-		submenu.AddItem(sInfo, sMenuItem);
-
-		for(int i = 1; i <= GetRandomInt(2, 4); i++)
+		// If multiple replays exist, show rank selection menu
+		if (hasTopNReplays)
 		{
-			FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
-			submenu.AddItem("-1", sMenuItem);
+			OpenDeleteReplayRankMenu(param1, style, gI_MenuTrack[param1]);
 		}
+		else
+		{
+			// Otherwise, proceed with current confirmation flow for rank 1
+			Menu submenu = new Menu(DeleteConfirmation_Callback);
+			submenu.SetTitle("%T", "ReplayDeletionConfirmation", param1, gS_StyleStrings[style].sStyleName);
 
-		submenu.ExitButton = true;
-		submenu.Display(param1, MENU_TIME_FOREVER);
+			char sMenuItem[64];
+
+			for(int i = 1; i <= GetRandomInt(2, 4); i++)
+			{
+				FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
+				submenu.AddItem("-1", sMenuItem);
+			}
+
+			FormatEx(sMenuItem, 64, "%T", "MenuResponseYes", param1);
+			submenu.AddItem(sInfo, sMenuItem);
+
+			for(int i = 1; i <= GetRandomInt(2, 4); i++)
+			{
+				FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
+				submenu.AddItem("-1", sMenuItem);
+			}
+
+			submenu.ExitButton = true;
+			submenu.Display(param1, MENU_TIME_FOREVER);
+		}
 	}
 	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
 	{
@@ -3011,6 +3316,254 @@ public int DeleteConfirmation_Callback(Menu menu, MenuAction action, int param1,
 				LogAction(param1, param1, "Deleted replay for %s on map %s. (Track: %s)", gS_StyleStrings[style].sStyleName, gS_Map, sTrack);
 
 				Shavit_PrintToChat(param1, "%T (%s%s%s)", "ReplayDeleted", param1, gS_ChatStrings.sStyle, gS_StyleStrings[style].sStyleName, gS_ChatStrings.sText, gS_ChatStrings.sVariable, sTrack, gS_ChatStrings.sText);
+			}
+			else
+			{
+				Shavit_PrintToChat(param1, "%T", "ReplayDeleteFailure", param1, gS_ChatStrings.sStyle, gS_StyleStrings[style].sStyleName, gS_ChatStrings.sText);
+			}
+		}
+
+		Command_DeleteReplay(param1, 0);
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+
+	return 0;
+}
+
+void OpenDeleteReplayRankMenu(int client, int style, int track)
+{
+	// Structure to hold rank menu data
+	// Each entry: [rank, steamid, time_as_float]
+	ArrayList rankData = new ArrayList(3);
+	ArrayList steamids = new ArrayList();
+	
+	for (int rank = 1; rank <= 5; rank++)
+	{
+		char sRankPath[PLATFORM_MAX_PATH];
+		Shavit_GetReplayFilePathForRank(style, track, rank, gS_Map, gS_ReplayFolder, sRankPath);
+		
+		if (FileExists(sRankPath))
+		{
+			replay_header_t header;
+			File file = ReadReplayHeader(sRankPath, header, style, track);
+			
+			if (file != null)
+			{
+				delete file;
+				
+				// Store rank data: rank, steamid, time
+				any data[3];
+				data[0] = rank;
+				data[1] = header.iSteamID;
+				data[2] = view_as<any>(header.fTime);
+				rankData.PushArray(data, sizeof(data));
+				
+				// Collect steamid for SQL query (skip rank 1 and entries without steamid)
+				// Note: SQL IN clause handles duplicates efficiently
+				if (rank > 1 && header.iSteamID != 0)
+				{
+					steamids.Push(header.iSteamID);
+				}
+			}
+		}
+	}
+	
+	// If we have steamids to query, build SQL query
+	if (steamids.Length > 0)
+	{
+		char sQuery[512];
+		int len = FormatEx(sQuery, sizeof(sQuery), "SELECT auth, name FROM %susers WHERE auth IN (", gS_MySQLPrefix);
+		
+		for (int i = 0; i < steamids.Length; i++)
+		{
+			len += FormatEx(sQuery[len], sizeof(sQuery) - len, "%d%s", steamids.Get(i), (i < steamids.Length - 1) ? "," : "");
+		}
+		
+		FormatEx(sQuery[len], sizeof(sQuery) - len, ");");
+		
+		delete steamids;
+		
+		// Package data for callback
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientSerial(client));
+		pack.WriteCell(style);
+		pack.WriteCell(track);
+		pack.WriteCell(rankData);
+		
+		QueryLog(gH_SQL, SQL_GetDeleteReplayRankNames_Callback, sQuery, pack, DBPrio_High);
+	}
+	else
+	{
+		// No steamids to query, build menu directly
+		delete steamids;
+		
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientSerial(client));
+		pack.WriteCell(style);
+		pack.WriteCell(track);
+		pack.WriteCell(rankData);
+		
+		SQL_GetDeleteReplayRankNames_Callback(null, null, "", pack);
+	}
+}
+
+public int MenuHandler_DeleteReplayRank(Menu menu, MenuAction action, int param1, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		char sInfo[8];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		int rank = StringToInt(sInfo);
+		
+		int style = gI_MenuStyle[param1];
+		
+		// Handle "Delete All" option
+		if (rank == -1)
+		{
+			Menu submenu = new Menu(DeleteAllRanksConfirmation_Callback);
+			submenu.SetTitle("%T", "DeleteAllConfirmation", param1, gS_StyleStrings[style].sStyleName);
+
+			char sMenuItem[64];
+
+			for(int i = 1; i <= GetRandomInt(2, 4); i++)
+			{
+				FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
+				submenu.AddItem("-1", sMenuItem);
+			}
+
+			FormatEx(sMenuItem, 64, "%T", "MenuResponseYes", param1);
+			submenu.AddItem("0", sMenuItem);
+
+			for(int i = 1; i <= GetRandomInt(2, 4); i++)
+			{
+				FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
+				submenu.AddItem("-1", sMenuItem);
+			}
+
+			submenu.ExitButton = true;
+			submenu.Display(param1, MENU_TIME_FOREVER);
+		}
+		// Handle specific rank deletion
+		else if (rank >= 1 && rank <= 5)
+		{
+			// Show confirmation menu for this specific rank
+			Menu submenu = new Menu(DeleteRankConfirmation_Callback);
+			
+			char sTitle[128];
+			FormatEx(sTitle, sizeof(sTitle), "%T (Rank #%d)", "DeleteRankConfirmation", param1, gS_StyleStrings[style].sStyleName, rank);
+			submenu.SetTitle(sTitle);
+
+			char sMenuItem[64];
+
+			for(int i = 1; i <= GetRandomInt(2, 4); i++)
+			{
+				FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
+				submenu.AddItem("-1", sMenuItem);
+			}
+
+			FormatEx(sMenuItem, 64, "%T", "MenuResponseYes", param1);
+			submenu.AddItem(sInfo, sMenuItem);
+
+			for(int i = 1; i <= GetRandomInt(2, 4); i++)
+			{
+				FormatEx(sMenuItem, 64, "%T", "MenuResponseNo", param1);
+				submenu.AddItem("-1", sMenuItem);
+			}
+
+			submenu.ExitButton = true;
+			submenu.Display(param1, MENU_TIME_FOREVER);
+		}
+	}
+	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
+	{
+		Command_DeleteReplay(param1, 0);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	
+	return 0;
+}
+
+public int DeleteRankConfirmation_Callback(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Select)
+	{
+		char sInfo[8];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		int rank = StringToInt(sInfo);
+
+		if (rank >= 1 && rank <= 5)
+		{
+			int style = gI_MenuStyle[param1];
+			int track = gI_MenuTrack[param1];
+			
+			if (DeleteReplay(style, track, 0, gS_Map, rank))
+			{
+				char sTrack[32];
+				GetTrackName(param1, track, sTrack, 32);
+
+				LogAction(param1, param1, "Deleted replay (rank #%d) for %s on map %s. (Track: %s)", rank, gS_StyleStrings[style].sStyleName, gS_Map, sTrack);
+
+				Shavit_PrintToChat(param1, "%T (%s%s%s - Rank #%d)", "ReplayDeleted", param1, gS_ChatStrings.sStyle, gS_StyleStrings[style].sStyleName, gS_ChatStrings.sText, gS_ChatStrings.sVariable, sTrack, gS_ChatStrings.sText, rank);
+			}
+			else
+			{
+				Shavit_PrintToChat(param1, "%T", "ReplayDeleteFailure", param1, gS_ChatStrings.sStyle, gS_StyleStrings[style].sStyleName, gS_ChatStrings.sText);
+			}
+		}
+
+		Command_DeleteReplay(param1, 0);
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+
+	return 0;
+}
+
+public int DeleteAllRanksConfirmation_Callback(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Select)
+	{
+		char sInfo[8];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		int confirm = StringToInt(sInfo);
+
+		if (confirm == 0)
+		{
+			int style = gI_MenuStyle[param1];
+			int track = gI_MenuTrack[param1];
+			
+			// Delete all ranked replays (1 through 5)
+			int deletedCount = 0;
+			for (int rank = 1; rank <= 5; rank++)
+			{
+				char sRankPath[PLATFORM_MAX_PATH];
+				Shavit_GetReplayFilePathForRank(style, track, rank, gS_Map, gS_ReplayFolder, sRankPath);
+				
+				if (FileExists(sRankPath) && DeleteFile(sRankPath))
+				{
+					deletedCount++;
+				}
+			}
+			
+			if (deletedCount > 0)
+			{
+				char sTrack[32];
+				GetTrackName(param1, track, sTrack, 32);
+
+				LogAction(param1, param1, "Deleted all %d replays for %s on map %s. (Track: %s)", deletedCount, gS_StyleStrings[style].sStyleName, gS_Map, sTrack);
+
+				Shavit_PrintToChat(param1, "%T (%s%s%s - %d replays)", "AllReplaysDeleted", param1, gS_ChatStrings.sStyle, gS_StyleStrings[style].sStyleName, gS_ChatStrings.sText, gS_ChatStrings.sVariable, sTrack, gS_ChatStrings.sText, deletedCount);
+				
+				// Reload the replay cache
+				UnloadReplay(style, track, false, false);
 			}
 			else
 			{
@@ -3369,6 +3922,19 @@ void OpenReplayStyleMenu(int client, int track)
 
 		float time = GetReplayLength(iStyle, track, gA_FrameCache[iStyle][track]);
 
+		// Check if there are Top-N replays for this style/track
+		bool hasTopNReplays = false;
+		for (int rank = 2; rank <= 5; rank++)
+		{
+			char sRankPath[PLATFORM_MAX_PATH];
+			Shavit_GetReplayFilePathForRank(iStyle, track, rank, gS_Map, gS_ReplayFolder, sRankPath);
+			if (FileExists(sRankPath))
+			{
+				hasTopNReplays = true;
+				break;
+			}
+		}
+
 		char sDisplay[64];
 
 		if(time > 0.0)
@@ -3376,7 +3942,14 @@ void OpenReplayStyleMenu(int client, int track)
 			char sTime[32];
 			FormatSeconds(time, sTime, 32, false);
 
-			FormatEx(sDisplay, 64, "%s - %s", gS_StyleStrings[iStyle].sStyleName, sTime);
+			if (hasTopNReplays)
+			{
+				FormatEx(sDisplay, 64, "%s - %s ►", gS_StyleStrings[iStyle].sStyleName, sTime);
+			}
+			else
+			{
+				FormatEx(sDisplay, 64, "%s - %s", gS_StyleStrings[iStyle].sStyleName, sTime);
+			}
 		}
 		else
 		{
@@ -3410,51 +3983,29 @@ public int MenuHandler_ReplayStyle(Menu menu, MenuAction action, int param1, int
 		}
 
 		gI_MenuStyle[param1] = style;
-		int type = gI_MenuType[param1];
-
-		int bot = -1;
-
-		if (type == Replay_Central)
+		
+		// Check if there are Top-N replays for this style/track
+		bool hasTopNReplays = false;
+		for (int rank = 2; rank <= 5; rank++)
 		{
-			if (!IsValidClient(gI_CentralBot))
+			char sRankPath[PLATFORM_MAX_PATH];
+			Shavit_GetReplayFilePathForRank(style, gI_MenuTrack[param1], rank, gS_Map, gS_ReplayFolder, sRankPath);
+			if (FileExists(sRankPath))
 			{
-				return 0;
-			}
-
-			if (gA_BotInfo[gI_CentralBot].iStatus != Replay_Idle)
-			{
-				Shavit_PrintToChat(param1, "%T", "CentralReplayPlaying", param1);
-				return 0;
-			}
-
-			bot = gI_CentralBot;
-		}
-		else if (type == Replay_Dynamic)
-		{
-			if (gI_DynamicBots >= gCV_DynamicBotLimit.IntValue)
-			{
-				Shavit_PrintToChat(param1, "%T", "TooManyDynamicBots", param1);
-				return 0;
+				hasTopNReplays = true;
+				break;
 			}
 		}
-		else if (type == Replay_Prop)
+		
+		// If there are Top-N replays, show rank selection menu
+		if (hasTopNReplays)
 		{
-			if (!gCV_AllowPropBots.BoolValue)
-			{
-				return 0;
-			}
-		}
-
-		frame_cache_t cache; // NULL cache
-		bot = CreateReplayEntity(gI_MenuTrack[param1], gI_MenuStyle[param1], gCV_ReplayDelay.FloatValue, param1, bot, type, false, cache, 0);
-
-		if (bot == 0)
-		{
-			Shavit_PrintToChat(param1, "%T", "FailedToCreateReplay", param1);
+			OpenReplayRankMenu(param1, style, gI_MenuTrack[param1]);
 			return 0;
 		}
-
-		OpenReplayMenu(param1, true);
+		
+		// Otherwise, proceed with starting the replay directly (legacy behavior)
+		StartReplayFromMenu(param1, style, gI_MenuTrack[param1], 1);
 	}
 	else if(action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
 	{
@@ -3466,6 +4017,205 @@ public int MenuHandler_ReplayStyle(Menu menu, MenuAction action, int param1, int
 	}
 
 	return 0;
+}
+
+void OpenReplayRankMenu(int client, int style, int track)
+{
+	// Structure to hold rank menu data
+	// Each entry: [rank, steamid, time_as_float]
+	ArrayList rankData = new ArrayList(3);
+	ArrayList steamids = new ArrayList();
+	
+	for (int rank = 1; rank <= 5; rank++)
+	{
+		char sRankPath[PLATFORM_MAX_PATH];
+		Shavit_GetReplayFilePathForRank(style, track, rank, gS_Map, gS_ReplayFolder, sRankPath);
+		
+		if (FileExists(sRankPath))
+		{
+			replay_header_t header;
+			File file = ReadReplayHeader(sRankPath, header, style, track);
+			
+			if (file != null)
+			{
+				delete file;
+				
+				// Store rank data: rank, steamid, time
+				any data[3];
+				data[0] = rank;
+				data[1] = header.iSteamID;
+				data[2] = view_as<any>(header.fTime);
+				rankData.PushArray(data, sizeof(data));
+				
+				// Collect steamid for SQL query (skip rank 1 and entries without steamid)
+				// Note: SQL IN clause handles duplicates efficiently
+				if (rank > 1 && header.iSteamID != 0)
+				{
+					steamids.Push(header.iSteamID);
+				}
+			}
+		}
+	}
+	
+	// If we have steamids to query, build SQL query
+	if (steamids.Length > 0)
+	{
+		char sQuery[512];
+		int len = FormatEx(sQuery, sizeof(sQuery), "SELECT auth, name FROM %susers WHERE auth IN (", gS_MySQLPrefix);
+		
+		for (int i = 0; i < steamids.Length; i++)
+		{
+			len += FormatEx(sQuery[len], sizeof(sQuery) - len, "%d%s", steamids.Get(i), (i < steamids.Length - 1) ? "," : "");
+		}
+		
+		FormatEx(sQuery[len], sizeof(sQuery) - len, ");");
+		
+		delete steamids;
+		
+		// Package data for callback
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientSerial(client));
+		pack.WriteCell(style);
+		pack.WriteCell(track);
+		pack.WriteCell(rankData);
+		
+		QueryLog(gH_SQL, SQL_GetReplayRankNames_Callback, sQuery, pack, DBPrio_High);
+	}
+	else
+	{
+		// No steamids to query, build menu directly
+		delete steamids;
+		
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientSerial(client));
+		pack.WriteCell(style);
+		pack.WriteCell(track);
+		pack.WriteCell(rankData);
+		
+		SQL_GetReplayRankNames_Callback(null, null, "", pack);
+	}
+}
+
+public int MenuHandler_ReplayRank(Menu menu, MenuAction action, int param1, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		char sInfo[8];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		int rank = StringToInt(sInfo);
+		
+		if (rank < 1 || rank > 5)
+		{
+			return 0;
+		}
+		
+		StartReplayFromMenu(param1, gI_MenuStyle[param1], gI_MenuTrack[param1], rank);
+	}
+	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
+	{
+		OpenReplayStyleMenu(param1, gI_MenuTrack[param1]);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	
+	return 0;
+}
+
+void StartReplayFromMenu(int client, int style, int track, int rank)
+{
+	int type = gI_MenuType[client];
+	int bot = -1;
+
+	if (type == Replay_Central)
+	{
+		if (!IsValidClient(gI_CentralBot))
+		{
+			return;
+		}
+
+		if (gA_BotInfo[gI_CentralBot].iStatus != Replay_Idle)
+		{
+			Shavit_PrintToChat(client, "%T", "CentralReplayPlaying", client);
+			return;
+		}
+
+		bot = gI_CentralBot;
+	}
+	else if (type == Replay_Dynamic)
+	{
+		if (gI_DynamicBots >= gCV_DynamicBotLimit.IntValue)
+		{
+			Shavit_PrintToChat(client, "%T", "TooManyDynamicBots", client);
+			return;
+		}
+	}
+	else if (type == Replay_Prop)
+	{
+		if (!gCV_AllowPropBots.BoolValue)
+		{
+			return;
+		}
+	}
+
+	// For rank 1, use the standard replay loading (from cache)
+	if (rank == 1)
+	{
+		frame_cache_t cache; // NULL cache - will load from gA_FrameCache
+		bot = CreateReplayEntity(track, style, gCV_ReplayDelay.FloatValue, client, bot, type, false, cache, 0);
+
+		if (bot == 0)
+		{
+			Shavit_PrintToChat(client, "%T", "FailedToCreateReplay", client);
+			return;
+		}
+
+		OpenReplayMenu(client, true);
+		return;
+	}
+
+	// For rank 2+, load the replay from file
+	char sReplayPath[PLATFORM_MAX_PATH];
+	Shavit_GetReplayFilePathForRank(style, track, rank, gS_Map, gS_ReplayFolder, sReplayPath);
+	
+	if (!FileExists(sReplayPath))
+	{
+		Shavit_PrintToChat(client, "Replay for rank #%d not found. | 未找到排名 #%d 的录像。", rank, rank);
+		return;
+	}
+	
+	// Load the replay
+	frame_cache_t cache;
+	cache.aFrames = new ArrayList(sizeof(frame_t));
+	
+	bool success = LoadReplayCache(cache, style, track, sReplayPath, gS_Map);
+	
+	if (!success || cache.aFrames.Length == 0)
+	{
+		delete cache.aFrames;
+		Shavit_PrintToChat(client, "%T", "FailedToLoadReplay", client);
+		return;
+	}
+
+	bot = CreateReplayEntity(track, style, gCV_ReplayDelay.FloatValue, client, bot, type, false, cache, 0);
+
+	if (bot == 0)
+	{
+		delete cache.aFrames;
+		Shavit_PrintToChat(client, "%T", "FailedToCreateReplay", client);
+		return;
+	}
+
+	// Query database for player name if SteamID is available
+	if (cache.iSteamID != 0)
+	{
+		char sQuery[192];
+		FormatEx(sQuery, sizeof(sQuery), "SELECT name FROM %susers WHERE auth = %d;", gS_MySQLPrefix, cache.iSteamID);
+		QueryLog(gH_SQL, SQL_GetUserName_Botref_Callback, sQuery, EntIndexToEntRef(bot), DBPrio_High);
+	}
+
+	OpenReplayMenu(client, true);
 }
 
 bool CanControlReplay(int client, bot_info_t info)
@@ -3929,7 +4679,7 @@ float GetClosestReplayTime(int client)
 	gA_FrameCache[style][track].aFrames.GetArray(iClosestFrame == 0 ? 0 : iClosestFrame-1, fReplayPrevPos, 3);
 
 	float replayVel[3];
-	MakeVectorFromPoints(fReplayClosestPos, fReplayPrevPos, replayVel);
+	MakeVectorFromPoints(fReplayPrevPos, fReplayClosestPos, replayVel);
 	ScaleVector(replayVel, gF_Tickrate / Shavit_GetStyleSettingFloat(style, "speed") / Shavit_GetStyleSettingFloat(style, "timescale"));
 
 	gF_VelocityDifference2D[client] = (SquareRoot(Pow(clientVel[0], 2.0) + Pow(clientVel[1], 2.0))) - (SquareRoot(Pow(replayVel[0], 2.0) + Pow(replayVel[1], 2.0)));

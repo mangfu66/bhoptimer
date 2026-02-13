@@ -31,6 +31,32 @@ stock void Shavit_GetReplayFilePath(int style, int track, const char[] mapname, 
 	FormatEx(sPath, PLATFORM_MAX_PATH, "%s/%d/%s%s.replay", replayfolder, style, mapname, (track > 0)? sTrack:"");
 }
 
+// Get replay file path for a specific rank (Top-N system)
+stock void Shavit_GetReplayFilePathForRank(int style, int track, int rank, const char[] mapname, const char[] replayfolder, char sPath[PLATFORM_MAX_PATH])
+{
+	if (rank == 1)
+	{
+		// Rank 1 uses the legacy format for backward compatibility
+		Shavit_GetReplayFilePath(style, track, mapname, replayfolder, sPath);
+	}
+	else
+	{
+		// Ranks 2+ use the new format with rank suffix
+		char sTrack[8];
+		if (track > 0)
+		{
+			FormatEx(sTrack, sizeof(sTrack), "_%d", track);
+		}
+		else
+		{
+			sTrack[0] = '\0';
+		}
+		
+		FormatEx(sPath, PLATFORM_MAX_PATH, "%s/%d/%s%s_rank%d.replay", 
+			replayfolder, style, mapname, sTrack, rank);
+	}
+}
+
 stock bool Shavit_GetReplayFolderPath_Stock(char buffer[PLATFORM_MAX_PATH])
 {
 	char sPath[PLATFORM_MAX_PATH];

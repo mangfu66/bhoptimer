@@ -30,7 +30,9 @@
 #undef REQUIRE_PLUGIN
 #include <shavit/rankings>
 #include <shavit/zones>
+#tryinclude <shavit/tagteam>
 #include <adminmenu>
+#define REQUIRE_PLUGIN
 
 #pragma newdecls required
 #pragma semicolon 1
@@ -88,6 +90,11 @@ ArrayList gA_Leaderboard[STYLE_LIMIT][TRACKS_SIZE];
 bool gB_LoadedCache[MAXPLAYERS+1];
 float gF_PlayerRecord[MAXPLAYERS+1][STYLE_LIMIT][TRACKS_SIZE];
 int gI_PlayerCompletion[MAXPLAYERS+1][STYLE_LIMIT][TRACKS_SIZE];
+
+// TagTeam WR cache
+bool g_bIsTagTeamWR[STYLE_LIMIT][TRACKS_SIZE];
+char g_cTagTeamName[STYLE_LIMIT][TRACKS_SIZE][64];
+char g_cTagTeamMembers[STYLE_LIMIT][TRACKS_SIZE][256];
 
 // admin menu
 TopMenu gH_AdminMenu = null;
@@ -1902,6 +1909,7 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 	}
 
 	int iSteamID = GetSteamAccountID(client);
+	int style = gA_WRCache[client].iLastStyle;
 
 	Menu hMenu = new Menu(WRMenu_Handler);
 
@@ -1930,7 +1938,21 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 			int jumps = results.FetchInt(3);
 
 			char sDisplay[128];
-			FormatEx(sDisplay, 128, "#%d - %s - %s (%d %T)", iCount, sName, sTime, jumps, "WRJumps", client);
+
+#if defined _shavit_tagteam_included
+			// Check if this is a TagTeam WR
+			if (iCount == 1 && g_bIsTagTeamWR[style][track])
+			{
+				FormatEx(sDisplay, 128, "#%d - Teamname: %s\n     Runners: %s\n     %s (%d %T)", 
+					iCount, g_cTagTeamName[style][track], g_cTagTeamMembers[style][track], 
+					sTime, jumps, "WRJumps", client);
+			}
+			else
+#endif
+			{
+				FormatEx(sDisplay, 128, "#%d - %s - %s (%d %T)", iCount, sName, sTime, jumps, "WRJumps", client);
+			}
+
 			hMenu.AddItem(sID, sDisplay);
 		}
 
@@ -2135,17 +2157,17 @@ public void SQL_RR_Callback(Database db, DBResultSet results, const char[] error
 {
 	int client = GetClientFromSerial(data);
 
+	if(client == 0)
+	{
+		return;
+	}
+
 	gA_WRCache[client].bPendingMenu = false;
 
 	if(results == null)
 	{
 		LogError("Timer (RR SELECT) SQL query failed. Reason: %s", error);
 
-		return;
-	}
-
-	if(client == 0)
-	{
 		return;
 	}
 
@@ -3073,6 +3095,51 @@ public void SQL_UpdateLeaderboards_Callback(Database db, DBResultSet results, co
 
 	Call_StartForward(gH_OnWorldRecordsCached);
 	Call_Finish();
+
+#if defined _shavit_tagteam_included
+	// Load TagTeam WR info if available
+	for (int style = 0; style < gI_Styles; style++)
+	{
+		if (Shavit_GetStyleSettingInt(style, "unranked"))
+			continue;
+
+		for (int track = 0; track < TRACKS_SIZE; track++)
+		{
+			g_bIsTagTeamWR[style][track] = false;
+			g_cTagTeamName[style][track][0] = '\0';
+			g_cTagTeamMembers[style][track][0] = '\0';
+
+			if (gF_WRTime[style][track] == 0.0)
+				continue;
+
+			char teamName[64];
+			ArrayList members = new ArrayList(ByteCountToCells(MAX_NAME_LENGTH));
+
+			if (Shavit_GetTagTeamWRInfo(gS_Map, style, track, teamName, sizeof(teamName), members))
+			{
+				g_bIsTagTeamWR[style][track] = true;
+				strcopy(g_cTagTeamName[style][track], 64, teamName);
+
+				// Format members list
+				char membersList[256];
+				for (int i = 0; i < members.Length; i++)
+				{
+					char name[MAX_NAME_LENGTH];
+					members.GetString(i, name, sizeof(name));
+
+					if (i == 0)
+						FormatEx(membersList, sizeof(membersList), "%s", name);
+					else
+						Format(membersList, sizeof(membersList), "%s, %s", membersList, name);
+				}
+
+				strcopy(g_cTagTeamMembers[style][track], 256, membersList);
+			}
+
+			delete members;
+		}
+	}
+#endif
 }
 
 public Action Shavit_OnStageMessage(int client, int stageNumber, char[] message, int maxlen)

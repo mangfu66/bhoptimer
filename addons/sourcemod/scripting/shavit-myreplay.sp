@@ -224,6 +224,12 @@ public void OnClientDisconnect(int client)
     {
         delete gM_ReplayMenu[client];
     }
+
+    // Clean up frame cache to prevent memory leak
+    if(gA_FrameCache[client].aFrames != null)
+    {
+        delete gA_FrameCache[client].aFrames;
+    }
 }
 
 public void Shavit_OnDatabaseLoaded()
@@ -1082,8 +1088,12 @@ public int DeleteConfirm_MenuHandler(Menu menu, MenuAction action, int param1, i
             if(param2 == MenuCancel_ExitBack)
             {
                 CreateMyReplayMenu(param1);
-                delete menu;
             }
+        }
+
+        case MenuAction_End:
+        {
+            delete menu;
         }
     }
 
