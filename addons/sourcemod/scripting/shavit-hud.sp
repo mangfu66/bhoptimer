@@ -186,6 +186,7 @@ float gF_AngleDiff[MAXPLAYERS+1];
 bool gB_Late = false;
 char gS_HintPadding[MAX_HINT_SIZE];
 bool gB_AlternateCenterKeys[MAXPLAYERS+1]; // use for css linux gamers
+native bool Shavit_GetTagTeamWRInfo(const char[] map, int style, int track, char[] teamName, int maxlen, ArrayList members);
 
 // hud handle
 Handle gH_HUDTopleft = null;
@@ -467,6 +468,7 @@ public void Shavit_OnWorldRecord(int client, int style, float time, int jumps, i
 	}
 }
 
+/*
 void GetCachedWRName(int style, int track, char[] buffer, int maxlen)
 {
 	char sKey[32];
@@ -500,6 +502,57 @@ void GetCachedWRName(int style, int track, char[] buffer, int maxlen)
 	else if (StrEqual(buffer, "N/A"))
 	{
 		// If cached as "N/A", just return empty string to avoid ugly text
+		buffer[0] = '\0';
+	}
+}
+*/
+
+void GetCachedWRName(int style, int track, char[] buffer, int maxlen)
+{
+	// 【新增】优先检查是否为 TagTeam 模式
+	if (Shavit_GetStyleSettingBool(style, "tagteam"))
+	{
+		char teamName[64];
+		ArrayList members = new ArrayList(32);
+		
+		// 如果能从 tagteam 插件获取到队伍WR信息，直接拿来用，完全不需要进行 SQL 查询！
+		if (Shavit_GetTagTeamWRInfo(gS_CurrentMap, style, track, teamName, sizeof(teamName), members))
+		{
+			strcopy(buffer, maxlen, teamName);
+			delete members;
+			return; 
+		}
+		delete members;
+	}
+
+	// === 下面保持原版单人逻辑不变 ===
+	char sKey[32];
+	Format(sKey, sizeof(sKey), "%d_%d", style, track);
+
+	if (!gSM_WRNames.GetString(sKey, buffer, maxlen))
+	{
+		if (gH_SQL == null)
+		{
+			buffer[0] = '\0';
+			return;
+		}
+		
+		strcopy(buffer, maxlen, "Loading...");
+		gSM_WRNames.SetString(sKey, "Loading...");
+		
+		char sEscapedMap[PLATFORM_MAX_PATH*2+1];
+		gH_SQL.Escape(gS_CurrentMap, sEscapedMap, sizeof(sEscapedMap));
+
+		char query[512];
+		Format(query, sizeof(query), "SELECT u.name FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE p.style = %d AND p.track = %d AND p.map = '%s' ORDER BY p.time ASC LIMIT 1", gS_MySQLPrefix, gS_MySQLPrefix, style, track, sEscapedMap);
+
+		DataPack pack = new DataPack();
+		pack.WriteCell(style);
+		pack.WriteCell(track);
+		gH_SQL.Query(SQL_FetchWRNameCallback, query, pack);
+	}
+	else if (StrEqual(buffer, "N/A"))
+	{
 		buffer[0] = '\0';
 	}
 }

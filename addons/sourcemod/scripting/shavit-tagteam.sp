@@ -48,6 +48,7 @@ int g_nRelayCount[MAX_TEAMS];
 int g_iCurrentPlayer[MAX_TEAMS];
 bool g_bTeamTaken[MAX_TEAMS];
 int g_nTeamPlayerCount[MAX_TEAMS];
+char g_sSQLPrefix[32];
 
 // 玩家状态
 int g_iTeamIndex[MAXPLAYERS + 1] = { -1, ... };
@@ -514,6 +515,16 @@ public Action Shavit_OnStart(int client, int track)
 	return Plugin_Continue;
 }
 
+// 【新增】拦截原版的单人通关消息，防止刷屏
+public Action Shavit_OnFinishMessage(int client, bool &bEveryone, timer_snapshot_t snapshot, int overwrite, int rank, char[] message, int maxlen, char[] message2, int maxlen2)
+{
+	if (Shavit_GetStyleSettingBool(snapshot.bsStyle, "tagteam"))
+	{
+		return Plugin_Handled; // 拦截消息
+	}
+	return Plugin_Continue;
+}
+
 // --------------------------------------------------------------------------------
 //  数据库逻辑 (更新)
 // --------------------------------------------------------------------------------
@@ -523,6 +534,7 @@ public void Shavit_OnDatabaseLoaded()
 	gH_SQL = Shavit_GetDatabase();
 	if (gH_SQL != null)
 	{
+		GetTimerSQLPrefix(g_sSQLPrefix, sizeof(g_sSQLPrefix));
 		char driver[16];
 		gH_SQL.Driver.GetIdentifier(driver, sizeof(driver));
 		bool isSQLite = StrEqual(driver, "sqlite");
@@ -1774,6 +1786,7 @@ public void Shavit_OnRestart(int client, int track)
 }
 
 // ===== Shavit_OnFinish: 完成后自动离队并保存WR =====
+/*
 public void Shavit_OnFinish(int client, int style, float time, int jumps, int strafes, float sync, int track, float oldtime, float perfs, float avgvel, float maxvel, int timestamp)
 {
 	int teamidx = g_iTeamIndex[client];
@@ -1802,6 +1815,40 @@ public void Shavit_OnFinish(int client, int style, float time, int jumps, int st
 	
 	// 向完成者显示离队消息
 	Shavit_PrintToChat(client, " \x04[TagTeam]\x01 队伍完成记录！所有队员已自动离队并清除存档。");
+}
+*/
+
+// ===== Shavit_OnFinish_Post: 核心和 WR 插件一切处理完毕后触发，绝对安全的过河拆桥 =====
+public void Shavit_OnFinish_Post(int client, int style, float time, int jumps, int strafes, float sync, int rank, int overwrite, int track, float oldtime, float perfs, float avgvel, float maxvel, int timestamp)
+{
+	if (!Shavit_GetStyleSettingBool(style, "tagteam")) return;
+	int teamidx = g_iTeamIndex[client];
+	if (teamidx == -1 || teamidx < 0 || teamidx >= MAX_TEAMS) return;
+
+	// 1. 正常保存队伍 WR 到自定义表
+	SaveTeamWR(teamidx, style, track, time, jumps, strafes, sync, perfs, timestamp);
+
+	// 2. 【核心修改】过河拆桥：异步删除 Shavit 核心刚刚在后台插入的单人幽灵记录！
+	// 因为同用一个 gH_SQL 句柄，这里的 DELETE 会排在核心的 INSERT 之后执行，完美消除幽灵记录。
+	char query[512];
+	FormatEx(query, sizeof(query), "DELETE FROM %splayertimes WHERE auth = %d AND map = '%s' AND style = %d AND track = %d;", 
+		g_sSQLPrefix, GetSteamAccountID(client), g_cMapName, style, track);
+	SQL_TQuery(gH_SQL, SQL_Void_Callback, query);
+
+	// 3. 所有队员强制离队并清除状态
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && g_iTeamIndex[i] == teamidx)
+		{
+			ExitTeam(i, true); // silent exit
+			Shavit_ClearCheckpoints(i);
+			Shavit_StopTimer(i);
+			Shavit_RestartTimer(i, Track_Main);
+		}
+	}
+	
+	// 4. 播报真正的队伍通关消息
+	Shavit_PrintToChatAll(" \x04[TagTeam]\x01 恭喜！队伍 \x03%s\x01 完成了接力记录！用时: \x04%.2f", g_cTeamName[teamidx], time);
 }
 
 // ===== 保存队伍WR到数据库 =====
@@ -1891,7 +1938,9 @@ void SaveTeamMembers(int teamidx, int teamTimeId)
 // ===== 成员保存成功 =====
 public void SQL_SaveMembers_Success(Database db, any data, int numQueries, DBResultSet[] results, any[] queryData)
 {
-	// 成功保存
+	// 成功保存后，立即重新读取数据库，刷新当前地图的 TagTeam WR 缓存！
+	LoadTagTeamWRCache();
+	PrintToServer("[TagTeam] 新的接力记录已诞生，WR缓存已刷新！");
 }
 
 // ===== 成员保存失败 =====

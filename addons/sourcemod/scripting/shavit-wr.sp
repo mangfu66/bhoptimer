@@ -1879,7 +1879,19 @@ void StartWRMenu(int client)
 	gH_SQL.Escape(gA_WRCache[client].sClientMap, sEscapedMap, iLength);
 
 	char sQuery[512];
-	FormatEx(sQuery, 512, "SELECT p.id, u.name, p.time, p.jumps, p.auth FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE map = '%s' AND style = %d AND track = %d ORDER BY time ASC, date ASC;", gS_MySQLPrefix, gS_MySQLPrefix, sEscapedMap, gA_WRCache[client].iLastStyle, gA_WRCache[client].iLastTrack);
+	
+	// 【修改】根据所选模式，决定去哪张表查具体名单
+	if (Shavit_GetStyleSettingBool(gA_WRCache[client].iLastStyle, "tagteam"))
+	{
+		// 注意这里把 team_name AS name，0 AS auth，以完美匹配原版 FetchRow 的列顺序
+		FormatEx(sQuery, 512, "SELECT id, team_name AS name, time, jumps, 0 AS auth FROM tagteam_times WHERE map = '%s' AND style = %d AND track = %d ORDER BY time ASC, date ASC;", sEscapedMap, gA_WRCache[client].iLastStyle, gA_WRCache[client].iLastTrack);
+	}
+	else
+	{
+		// 原版单人查询
+		FormatEx(sQuery, 512, "SELECT p.id, u.name, p.time, p.jumps, p.auth FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE map = '%s' AND style = %d AND track = %d ORDER BY time ASC, date ASC;", gS_MySQLPrefix, gS_MySQLPrefix, sEscapedMap, gA_WRCache[client].iLastStyle, gA_WRCache[client].iLastTrack);
+	}
+
 	QueryLog(gH_SQL, SQL_WR_Callback, sQuery, dp);
 }
 
@@ -1940,12 +1952,20 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 			char sDisplay[128];
 
 #if defined _shavit_tagteam_included
-			// Check if this is a TagTeam WR
-			if (iCount == 1 && g_bIsTagTeamWR[style][track])
+			// 【修改】如果当前查询的是接力模式，所有名次都应加上 Team 前缀
+			if (Shavit_GetStyleSettingBool(style, "tagteam"))
 			{
-				FormatEx(sDisplay, 128, "#%d - Teamname: %s\n     Runners: %s\n     %s (%d %T)", 
-					iCount, g_cTagTeamName[style][track], g_cTagTeamMembers[style][track], 
-					sTime, jumps, "WRJumps", client);
+				if (iCount == 1 && g_bIsTagTeamWR[style][track])
+				{
+					FormatEx(sDisplay, 128, "#%d - Team: %s\n     Runners: %s\n     %s (%d %T)", 
+						iCount, sName, g_cTagTeamMembers[style][track], 
+						sTime, jumps, "WRJumps", client);
+				}
+				else
+				{
+					// 第2名及以后（缓存没有存其队员名单，只显示队名）
+					FormatEx(sDisplay, 128, "#%d - Team: %s - %s (%d %T)", iCount, sName, sTime, jumps, "WRJumps", client);
+				}
 			}
 			else
 #endif
@@ -3031,10 +3051,31 @@ public void Trans_ReplaceStageTimes_Error(Database db, any data, int numQueries,
 	LogError("Timer (ReplaceStageTimes) SQL query failed %d/%d. Reason: %s", failIndex, numQueries, error);
 }
 
+/*
 void UpdateLeaderboards()
 {
 	char sQuery[512];
 	FormatEx(sQuery, sizeof(sQuery), "SELECT p.style, p.track, %s, 0, p.id, p.auth, u.name FROM %splayertimes p LEFT JOIN %susers u ON p.auth = u.auth WHERE p.map = '%s' ORDER BY p.time ASC, p.date ASC;", gI_Driver == Driver_mysql ? "REPLACE(FORMAT(time, 9), ',', '')" : "printf(\"%.9f\", p.time)", gS_MySQLPrefix, gS_MySQLPrefix, gS_Map);
+	QueryLog(gH_SQL, SQL_UpdateLeaderboards_Callback, sQuery);
+}
+*/
+
+void UpdateLeaderboards()
+{
+	char sQuery[1024];
+	
+	// 【修改】使用 UNION 把 playertimes 和 tagteam_times 的成绩合并排榜
+	FormatEx(sQuery, sizeof(sQuery), 
+		"SELECT style, track, %s, 0, id, auth, name FROM (" ...
+		"SELECT p.style, p.track, p.time, p.id, p.auth, u.name, p.date " ...
+		"FROM %splayertimes p LEFT JOIN %susers u ON p.auth = u.auth WHERE p.map = '%s' " ...
+		"UNION " ...
+		"SELECT t.style, t.track, t.time, t.id, 0 AS auth, t.team_name AS name, t.date " ...
+		"FROM tagteam_times t WHERE t.map = '%s'" ...
+		") AS combined ORDER BY time ASC, date ASC;", 
+		gI_Driver == Driver_mysql ? "REPLACE(FORMAT(time, 9), ',', '')" : "printf(\"%.9f\", time)", 
+		gS_MySQLPrefix, gS_MySQLPrefix, gS_Map, gS_Map);
+
 	QueryLog(gH_SQL, SQL_UpdateLeaderboards_Callback, sQuery);
 }
 
