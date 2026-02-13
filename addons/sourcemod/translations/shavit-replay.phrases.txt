@@ -37,6 +37,11 @@
 		"#format"	"{1:s},{2:s},{3:s}"
 		"en"		"Could not delete replay for {1}{2}{3}."
 	}
+	"AllReplaysDeleted"
+	{
+		"#format"	"{1:s},{2:s},{3:s}"
+		"en"		"Deleted all replays for {1}{2}{3}."
+	}
 	// ---------- Central Replay Menu ---------- //
 	"CentralReplayTitle"
 	{
@@ -115,5 +120,33 @@
 	"Menu_RefreshReplay"
 	{
 		"en"		"Refresh"
+	}
+	"Menu_SelectRank"
+	{
+		"en"		"Select Rank"
+		"chi"		"选择排名"
+	}
+	"Menu_SelectDeleteRank"
+	{
+		"en"		"Select Rank to Delete"
+	}
+	"DeleteAll"
+	{
+		"en"		"Delete All Ranks"
+	}
+	"DeleteRankConfirmation"
+	{
+		"#format"	"{1:s}"
+		"en"		"Confirm deletion of {1} replay?"
+	}
+	"DeleteAllConfirmation"
+	{
+		"#format"	"{1:s}"
+		"en"		"Confirm deletion of ALL {1} replays?"
+	}
+	"FailedToLoadReplay"
+	{
+		"en"		"Failed to load replay"
+		"chi"		"加载录像失败"
 	}
 }
