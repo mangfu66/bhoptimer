@@ -195,6 +195,7 @@ public void OnClientConnected(int client)
 {
 	g_iTeamIndex[client] = -1;
 	g_iLastTeamIndex[client] = -1;
+	g_bCreatingTeam[client] = false;
 	g_cPlayerTeamName[client][0] = '\0';
 	g_iPendingPassId[client] = 0;
 	
@@ -237,11 +238,31 @@ public void OnMapStart()
 	}
 }
 
+public void OnClientDisconnect(int client)
+{
+	if (g_aReplayRunners[client] != null)
+	{
+		delete g_aReplayRunners[client];
+		g_aReplayRunners[client] = null;
+	}
+}
+
 public void OnMapEnd()
 {
 	delete g_hTeamHudTimer;
+	
+	for (int i = 0; i < MAX_TEAMS; i++)
+	{
+		if (g_bHasLastPassCheckpoint[i])
+		{
+			if (g_LastPassCheckpoint[i].aFrames != null) delete g_LastPassCheckpoint[i].aFrames;
+			if (g_LastPassCheckpoint[i].aEvents != null) delete g_LastPassCheckpoint[i].aEvents;
+			if (g_LastPassCheckpoint[i].aOutputWaits != null) delete g_LastPassCheckpoint[i].aOutputWaits;
+			if (g_LastPassCheckpoint[i].customdata != null) delete g_LastPassCheckpoint[i].customdata;
+			g_bHasLastPassCheckpoint[i] = false;
+		}
+	}
 }
-
 // --------------------------------------------------------------------------------
 //  菜单劫持逻辑
 // --------------------------------------------------------------------------------
@@ -324,14 +345,23 @@ public Action Command_Say_Hook(int client, const char[] command, int args)
 			return Plugin_Continue;
 		
 		// Set team name
-		strcopy(g_cPlayerTeamName[client], sizeof(g_cPlayerTeamName[]), text);
-		Shavit_PrintToChat(client, " \x04[TagTeam]\x01 队名已设置为: \x03%s", text);
+		//strcopy(g_cPlayerTeamName[client], sizeof(g_cPlayerTeamName[]), text);
+		//Shavit_PrintToChat(client, " \x04[TagTeam]\x01 队名已设置为: \x03%s", text);
 		
 		// Reset flag - no longer waiting for input
 		// But keep g_bCreatingTeam true if they're still in invite flow
 		
 		// Reopen lobby menu
-		RequestFrame(Frame_ReopenLobby, GetClientSerial(client));
+		//RequestFrame(Frame_ReopenLobby, GetClientSerial(client));
+		
+		// Set team name
+        strcopy(g_cPlayerTeamName[client], sizeof(g_cPlayerTeamName[]), text);
+        Shavit_PrintToChat(client, " \x04[TagTeam]\x01 队名已设置为: \x03%s", text);
+        
+        g_bCreatingTeam[client] = false; 
+        
+        // Reopen lobby menu
+        RequestFrame(Frame_ReopenLobby, GetClientSerial(client));
 		
 		return Plugin_Handled; // Block the chat message
 	}
@@ -1565,9 +1595,12 @@ public Action Command_RefreshHUD(int client, int args)
 }
 
 void OpenInviteSelectMenu(int client, int firstItem, bool reset = false, int style = 0) {
-    if(reset) {
+	if(reset) {
         for(int i = 1; i <= MaxClients; i++) g_bInvitedPlayer[client][i] = false;
-        g_bCreatingTeam[client] = true; g_iInviteStyle[client] = style; g_nDeclinedPlayers[client] = 0;
+        // 【修复 2】建队初期不要拦截聊天，将其设为 false
+        g_bCreatingTeam[client] = false; 
+        g_iInviteStyle[client] = style; 
+        g_nDeclinedPlayers[client] = 0;
         delete g_aAcceptedPlayers[client]; g_aAcceptedPlayers[client] = new ArrayList();
         delete g_aInvitedPlayers[client]; g_aInvitedPlayers[client] = new ArrayList();
     }
@@ -1681,8 +1714,9 @@ public int LobbyMenu_Handler(Menu menu, MenuAction action, int param1, int param
 
 void CancelInvite(int client) { g_bCreatingTeam[client] = false; }
 void FinishInvite(int client) {
-    int len = g_aAcceptedPlayers[client].Length;
+    g_bCreatingTeam[client] = false; 
     
+    int len = g_aAcceptedPlayers[client].Length;
     // [ConVar] 检查最少人数要求
     int minPlayers = g_cvMinPlayers.IntValue;
     int requiredTeammates = (minPlayers == 0) ? 0 : 1; // 0=solo allowed, 1=need 1 teammate
@@ -1920,7 +1954,8 @@ void SaveTeamMembers(int teamidx, int teamTimeId)
 		char name[33];
 		GetClientName(i, name, sizeof(name));
 		
-		char escaped_name[65];
+		//char escaped_name[65];
+		char escaped_name[MAX_NAME_LENGTH * 2 + 1];
 		gH_SQL.Escape(name, escaped_name, sizeof(escaped_name));
 		
 		char query[512];
@@ -1960,6 +1995,9 @@ void LoadTagTeamWRCache()
 {
 	if (gH_SQL == null) return;
 	
+	char escMap[128];
+	gH_SQL.Escape(g_cMapName, escMap, sizeof(escMap));
+	
 	char query[1024];
 	FormatEx(query, sizeof(query),
 		"SELECT t1.style, t1.track, t1.team_name, t1.id " ...
@@ -1971,7 +2009,8 @@ void LoadTagTeamWRCache()
 		"    GROUP BY style, track " ...
 		") t2 ON t1.style = t2.style AND t1.track = t2.track AND t1.time = t2.min_time " ...
 		"WHERE t1.map = '%s'",
-		g_cMapName, g_cMapName);
+		//g_cMapName, g_cMapName);
+		escMap, escMap);
 	
 	gH_SQL.Query(SQL_LoadWRCache_Callback, query);
 }
