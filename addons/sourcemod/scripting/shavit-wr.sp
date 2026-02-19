@@ -1949,8 +1949,9 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 			// 3 - jumps
 			int jumps = results.FetchInt(3);
 
-			char sDisplay[128];
+			char sDisplay[512];
 
+/*
 #if defined _shavit_tagteam_included
 			// 【修改】如果当前查询的是接力模式，所有名次都应加上 Team 前缀
 			if (Shavit_GetStyleSettingBool(style, "tagteam"))
@@ -1975,7 +1976,31 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 
 			hMenu.AddItem(sID, sDisplay);
 		}
+*/
 
+#if defined _shavit_tagteam_included
+			if (Shavit_GetStyleSettingBool(style, "tagteam"))
+			{
+				if (iCount == 1 && g_bIsTagTeamWR[style][track])
+				{
+					FormatEx(sDisplay, 512, "#%d - Team: %s\n     Runners: %s\n     %s (%d %T)",
+						iCount, sName, g_cTagTeamMembers[style][track], 
+						sTime, jumps, "WRJumps", client);
+				}
+				else
+				{
+					FormatEx(sDisplay, 512, "#%d - Team: %s - %s (%d %T)", iCount, sName, sTime, jumps, "WRJumps", client);
+				}
+			}
+			else
+#endif
+			{
+				FormatEx(sDisplay, 512, "#%d - %s - %s (%d %T)", iCount, sName, sTime, jumps, "WRJumps", client);
+			}
+			
+			hMenu.AddItem(sID, sDisplay);
+		}
+		
 		// check if record exists in the map's top X
 		int iQuerySteamID = results.FetchInt(4);
 

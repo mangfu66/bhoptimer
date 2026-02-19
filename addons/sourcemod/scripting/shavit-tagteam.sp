@@ -10,6 +10,7 @@
 #include <shavit/hud>
 #include <shavit/replay-playback>
 #include <shavit/replay-file>
+#include <shavit/wr>
 
 #define MAX_TEAMS 12
 #define MAX_TEAM_MEMBERS 10
@@ -122,6 +123,9 @@ public void OnPluginStart()
 	
 	RegConsoleCmd("sm_tagteamhud", Command_RefreshHUD, "刷新 TagTeam HUD");
 	RegConsoleCmd("sm_tthud", Command_RefreshHUD, "刷新 TagTeam HUD");
+	
+	RegAdminCmd("sm_deleteteam", Command_DeleteTeam, ADMFLAG_RCON, "打开 TagTeam 记录删除菜单");
+	RegAdminCmd("sm_delteam", Command_DeleteTeam, ADMFLAG_RCON, "打开 TagTeam 记录删除菜单");
 
 	AddCommandListener(Command_CP_Hook, "sm_cp");
 	AddCommandListener(Command_CP_Hook, "sm_cpmenu");
@@ -902,7 +906,7 @@ public void Shavit_OnReplayStart(int entity, int type, bool delay_elapsed)
 	g_cReplayTeamName[entity][0] = '\0'; 
 
 	char query[512];
-	char escMap[128];
+	char escMap[513];
 	gH_SQL.Escape(g_cMapName, escMap, sizeof(escMap));
 	
 	Format(query, sizeof(query), 
@@ -1054,7 +1058,7 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
 	
 	if (teamIdx == -1) return;
 	
-	char escMap[128];
+	char escMap[513];
 	gH_SQL.Escape(g_cMapName, escMap, sizeof(escMap));
 	
 	char escTeamName[128];
@@ -1864,9 +1868,12 @@ public void Shavit_OnFinish_Post(int client, int style, float time, int jumps, i
 
 	// 2. 【核心修改】过河拆桥：异步删除 Shavit 核心刚刚在后台插入的单人幽灵记录！
 	// 因为同用一个 gH_SQL 句柄，这里的 DELETE 会排在核心的 INSERT 之后执行，完美消除幽灵记录。
+	char escMap[513];
+	gH_SQL.Escape(g_cMapName, escMap, sizeof(escMap));
+	
 	char query[512];
 	FormatEx(query, sizeof(query), "DELETE FROM %splayertimes WHERE auth = %d AND map = '%s' AND style = %d AND track = %d;", 
-		g_sSQLPrefix, GetSteamAccountID(client), g_cMapName, style, track);
+		g_sSQLPrefix, GetSteamAccountID(client), escMap, style, track);
 	SQL_TQuery(gH_SQL, SQL_Void_Callback, query);
 
 	// 3. 所有队员强制离队并清除状态
@@ -1894,6 +1901,9 @@ void SaveTeamWR(int teamidx, int style, int track, float time, int jumps, int st
 	char map[192];
 	GetCurrentMap(map, sizeof(map));
 	GetMapDisplayName(map, map, sizeof(map));
+	
+	char escMap[513];
+	gH_SQL.Escape(map, escMap, sizeof(escMap));
 	
 	char teamname[65];
 	strcopy(teamname, sizeof(teamname), g_cTeamName[teamidx]);
@@ -1995,7 +2005,7 @@ void LoadTagTeamWRCache()
 {
 	if (gH_SQL == null) return;
 	
-	char escMap[128];
+	char escMap[513];
 	gH_SQL.Escape(g_cMapName, escMap, sizeof(escMap));
 	
 	char query[1024];
@@ -2147,4 +2157,166 @@ public int Native_GetTagTeamWRInfo(Handle plugin, int numParams)
 	}
 	
 	return true;
+}
+
+public Action Command_DeleteTeam(int client, int args)
+{
+	if (!IsValidClient(client)) return Plugin_Handled;
+
+	if (gH_SQL == null)
+	{
+		Shavit_PrintToChat(client, " \x02[错误]\x01 数据库尚未连接。");
+		return Plugin_Handled;
+	}
+
+	char escMap[513];
+	gH_SQL.Escape(g_cMapName, escMap, sizeof(escMap));
+
+	// 查询当前地图的所有 TagTeam 记录
+	char query[512];
+	FormatEx(query, sizeof(query), "SELECT id, style, track, team_name, time FROM tagteam_times WHERE map = '%s' ORDER BY style ASC, track ASC, time ASC LIMIT 50;", escMap);
+	
+	gH_SQL.Query(SQL_DeleteTeamMenu_Callback, query, GetClientSerial(client));
+	return Plugin_Handled;
+}
+
+public void SQL_DeleteTeamMenu_Callback(Database db, DBResultSet results, const char[] error, any data)
+{
+	int client = GetClientFromSerial(data);
+	if (client == 0) return;
+
+	if (results == null)
+	{
+		LogError("[TagTeam] Delete Menu Query Failed: %s", error);
+		return;
+	}
+
+	Menu menu = new Menu(DeleteTeamMenu_Handler);
+	menu.SetTitle("删除 TagTeam 记录\n当前地图: %s\n ", g_cMapName);
+
+	if (results.RowCount == 0)
+	{
+		menu.AddItem("-1", "当前地图没有 TagTeam 记录", ITEMDRAW_DISABLED);
+	}
+	else
+	{
+		while (results.FetchRow())
+		{
+			int id = results.FetchInt(0);
+			int style = results.FetchInt(1);
+			int track = results.FetchInt(2);
+			
+			char teamName[64];
+			results.FetchString(3, teamName, sizeof(teamName));
+			
+			float time = results.FetchFloat(4);
+			char sTime[16];
+			FormatSeconds(time, sTime, sizeof(sTime));
+
+			// 【修复 1】使用正确的结构体获取模式名称，解决 Error 450
+			stylestrings_t styleStrings;
+			Shavit_GetStyleStringsStruct(style, styleStrings);
+
+			// 【修复 2】把闲置的 track 用上，标明是 Main 还是 Bonus
+			char szTrack[16];
+			if (track == 0) strcopy(szTrack, sizeof(szTrack), "Main");
+			else Format(szTrack, sizeof(szTrack), "Bonus %d", track);
+
+			char display[128];
+			// 格式: [Style | Main] 队名 - 00:00.00
+			FormatEx(display, sizeof(display), "[%s | %s] %s - %s", styleStrings.sStyleName, szTrack, teamName, sTime);
+
+			char info[16];
+			IntToString(id, info, sizeof(info));
+			menu.AddItem(info, display);
+		}
+	}
+	
+	menu.ExitButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int DeleteTeamMenu_Handler(Menu menu, MenuAction action, int param1, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		char info[16];
+		menu.GetItem(param2, info, sizeof(info));
+		// 【修复 3】直接删除了多余的 id 声明，消除 Warning
+
+		// 防呆设计：二次确认菜单
+		Menu confirm = new Menu(DeleteTeamConfirm_Handler);
+		confirm.SetTitle("【警告】确认要彻底删除这条队伍记录吗？\n删除后不可恢复！\n ");
+		confirm.AddItem("no", "取消 (Cancel)");
+		confirm.AddItem(info, "确认删除 (Confirm Delete)");
+		confirm.ExitButton = false;
+		confirm.Display(param1, MENU_TIME_FOREVER);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+public int DeleteTeamConfirm_Handler(Menu menu, MenuAction action, int param1, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		char info[16];
+		menu.GetItem(param2, info, sizeof(info));
+
+		if (StrEqual(info, "no"))
+		{
+			Shavit_PrintToChat(param1, " \x04[TagTeam]\x01 已取消删除操作。");
+		}
+		else
+		{
+			int id = StringToInt(info);
+			
+			// 使用事务 (Transaction) 确保成员表和时间表同时被删除，防止数据孤岛
+			Transaction txn = new Transaction();
+			
+			char query[256];
+			FormatEx(query, sizeof(query), "DELETE FROM tagteam_members WHERE team_id = %d;", id);
+			txn.AddQuery(query);
+			
+			FormatEx(query, sizeof(query), "DELETE FROM tagteam_times WHERE id = %d;", id);
+			txn.AddQuery(query);
+
+			DataPack pack = new DataPack();
+			pack.WriteCell(GetClientSerial(param1));
+
+			gH_SQL.Execute(txn, SQL_DeleteTeam_Success, SQL_DeleteTeam_Failure, pack);
+		}
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+public void SQL_DeleteTeam_Success(Database db, any data, int numQueries, DBResultSet[] results, any[] queryData)
+{
+	DataPack pack = view_as<DataPack>(data);
+	pack.Reset();
+	int client = GetClientFromSerial(pack.ReadCell());
+	delete pack;
+
+	if (client > 0) 
+		Shavit_PrintToChat(client, " \x04[TagTeam]\x01 队伍记录彻底删除成功！排行榜正在重新计算...");
+
+	// 1. 刷新 TagTeam 自身的 WR 缓存
+	LoadTagTeamWRCache();
+	
+	// 2. 通知 shavit-wr 重新执行 UNION 查询，立刻更新游戏内 !wr 榜单
+	Shavit_ReloadLeaderboards();
+}
+
+public void SQL_DeleteTeam_Failure(Database db, any data, int numQueries, const char[] error, int failIndex, any[] queryData)
+{
+	DataPack pack = view_as<DataPack>(data);
+	delete pack;
+	LogError("[TagTeam] Delete Record Failed (Query %d): %s", failIndex, error);
 }

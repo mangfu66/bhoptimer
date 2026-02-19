@@ -3081,7 +3081,7 @@ void UpdateTopLeftHUD(int client, bool wait)
 				else sWR = "N/A";
 
 				// Try to get cached WR name
-				char sWRName[MAX_NAME_LENGTH];
+				char sWRName[65];
 				GetCachedWRName(style, track, sWRName, sizeof(sWRName));
 
 				// Format WR Line
