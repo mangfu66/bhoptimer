@@ -138,6 +138,21 @@ public void OnClientPutInServer(int client)
 
 public void OnClientDisconnect(int client)
 {
+	if (g_aSavestates[client].aEvents != null)
+	{
+		delete g_aSavestates[client].aEvents;
+		g_aSavestates[client].aEvents = null;
+	}
+	if (g_aSavestates[client].aOutputWaits != null)
+	{
+		delete g_aSavestates[client].aOutputWaits;
+		g_aSavestates[client].aOutputWaits = null;
+	}
+	if (g_aSavestates[client].customdata != null)
+	{
+		delete g_aSavestates[client].customdata;
+		g_aSavestates[client].customdata = null;
+	}
 	// Only auto-save if autosave feature is enabled and timer is running
 	if (g_cvAutosaveExpiration.IntValue == 0)
 		return;
@@ -352,7 +367,8 @@ void OpenSavestateMenu(int client)
 	}
 	
 	menu.AddItem("load", "加载计时存档\n ", bHasAnyCurrentMapSave ? ITEMDRAW_DEFAULT: ITEMDRAW_DISABLED);
-	menu.AddItem("view", "查看所有存档", g_bHasAnySaves[client] ? ITEMDRAW_DEFAULT: ITEMDRAW_DISABLED);
+	menu.AddItem("view", "查看所有存档", ITEMDRAW_DEFAULT);
+	//menu.AddItem("view", "查看所有存档", g_bHasAnySaves[client] ? ITEMDRAW_DEFAULT: ITEMDRAW_DISABLED);
 
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
@@ -360,6 +376,12 @@ void OpenSavestateMenu(int client)
 
 public int OpenSavestateMenuHandler(Menu menu, MenuAction action, int param1, int param2)
 {
+	if(action == MenuAction_End)
+	{
+		delete menu;
+		return Plugin_Handled;
+	}
+	
 	if(action == MenuAction_Select)
 	{
 		char s[8];
@@ -698,6 +720,12 @@ void OpenLoadGameMenu(int client)
 
 public int OpenLoadGameMenuHandler(Menu menu, MenuAction action, int param1, int param2)
 {
+	if(action == MenuAction_End)
+	{
+		delete menu;
+		return Plugin_Handled;
+	}
+	
 	if(action == MenuAction_Select)
 	{
 		if(!IsPlayerAlive(param1))
@@ -915,6 +943,11 @@ void SQL_LoadEvents(Handle owner, Handle hndl, const char[] error, int client)
 {
 	if(SQL_GetRowCount(hndl) != 0)
 	{
+		if (g_aSavestates[client].aEvents != null)
+			delete g_aSavestates[client].aEvents;
+		if (g_aSavestates[client].aOutputWaits != null)
+			delete g_aSavestates[client].aOutputWaits;
+			
 		g_aSavestates[client].aEvents = new ArrayList(sizeof(event_t));
 		g_aSavestates[client].aOutputWaits = new ArrayList(sizeof(entity_t));
 
@@ -955,6 +988,9 @@ void LoadCustomData(int client, int iStyle, int track)
 
 void SQL_LoadCustomData(Handle owner, Handle hndl, const char[] error, int client)
 {
+	if (g_aSavestates[client].customdata != null)
+		delete g_aSavestates[client].customdata;
+	
 	StringMap cd = new StringMap();
 	char sKey[64];
 	char sValue[64];
@@ -1017,6 +1053,7 @@ public void SQL_DeleteLoadedGame(Handle owner, Handle hndl, const char[] error, 
 		GetClientSaves(client);
 }
 
+/*
 void OpenViewSavesMenu(int client)
 {
 	if (g_hSavesDB == INVALID_HANDLE)
@@ -1026,7 +1063,26 @@ void OpenViewSavesMenu(int client)
 	FormatEx(sQuery, sizeof(sQuery), "SELECT `map`, `style`, `TfCurrentTime`, `date` FROM `saves` WHERE auth = %i ORDER BY `date` DESC;", GetSteamAccountID(client));
 	SQL_TQuery(g_hSavesDB, SQL_OpenViewSavesMenu, sQuery, client);
 }
+*/
 
+void OpenViewSavesMenu(int client)
+{
+	if (g_hSavesDB == INVALID_HANDLE)
+		return;
+
+	char sQuery[1024];
+	// 使用 UNION 把手动存档和自动存档一起查出来，加上 0 和 1 作为 is_autosave 标记
+	FormatEx(sQuery, sizeof(sQuery), 
+		"SELECT `map`, `style`, `TfCurrentTime`, `date`, 0 AS is_autosave FROM `saves` WHERE auth = %i " ...
+		"UNION " ...
+		"SELECT `map`, `style`, `TfCurrentTime`, `disconnect_time` AS `date`, 1 AS is_autosave FROM `autosaves` WHERE auth = %i " ...
+		"ORDER BY `date` DESC;", 
+		GetSteamAccountID(client), GetSteamAccountID(client));
+		
+	SQL_TQuery(g_hSavesDB, SQL_OpenViewSavesMenu, sQuery, client);
+}
+
+/*
 void SQL_OpenViewSavesMenu(Handle owner, Handle hndl, const char[] error, int client)
 {
 	if(SQL_GetRowCount(hndl) == 0)
@@ -1066,9 +1122,68 @@ void SQL_OpenViewSavesMenu(Handle owner, Handle hndl, const char[] error, int cl
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
 }
+*/
+
+void SQL_OpenViewSavesMenu(Handle owner, Handle hndl, const char[] error, int client)
+{
+	if(SQL_GetRowCount(hndl) == 0)
+	{
+		Shavit_PrintToChat(client, "未找到存档");
+		OpenSavestateMenu(client);
+		return;
+	}
+
+	Menu menu = new Menu(OpenViewSavesMenuHandler);
+	menu.SetTitle("所有存档 (选择以提名)\n ");
+
+	char sMap[255];
+	int iStyle;
+	char sStyle[4];
+	float fTime;
+	char sTime[32];
+	int iDate;
+	int iIsAutosave; // 新增：用来判断是不是自动存档
+	char sDate[32];
+	char sDisplay[255];
+	
+	while(SQL_FetchRow(hndl))
+	{
+		SQL_FetchString(hndl, 0, sMap, sizeof(sMap));
+		iStyle = SQL_FetchInt(hndl, 1);
+		fTime = SQL_FetchFloat(hndl, 2);
+		iDate = SQL_FetchInt(hndl, 3);
+		iIsAutosave = SQL_FetchInt(hndl, 4); // 读取是 0 (手动) 还是 1 (自动)
+
+		IntToString(iStyle, sStyle, sizeof(sStyle));
+		FloatToString(fTime, sTime, sizeof(sTime));
+		FormatTime(sDate, sizeof(sDate), "%d %b %Y", iDate);
+		
+		// 根据存档类型写入不同的菜单文本
+		if (iIsAutosave)
+		{
+			FormatEx(sDisplay, sizeof(sDisplay), "%s - %s (Autosave)\n    时间: %s (断线于 %s)\n ", sMap, g_sStyleStrings[iStyle].sStyleName, FormatToSeconds(sTime), sDate);
+		}
+		else
+		{
+			FormatEx(sDisplay, sizeof(sDisplay), "%s - %s\n    时间: %s (%s)\n ", sMap, g_sStyleStrings[iStyle].sStyleName, FormatToSeconds(sTime), sDate);
+		}
+		
+		menu.AddItem(sMap, sDisplay, StrEqual(g_sCurrentMap, sMap) ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+	}
+
+	menu.ExitBackButton = true;
+	menu.ExitButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
 
 public int OpenViewSavesMenuHandler(Menu menu, MenuAction action, int param1, int param2)
 {
+	if(action == MenuAction_End)
+	{
+		delete menu;
+		return Plugin_Handled;
+	}
+	
 	if(action == MenuAction_Select)
 	{
 		char sMap[PLATFORM_MAX_PATH];
@@ -1670,6 +1785,10 @@ public void SQL_AutoloadGame(Handle owner, Handle hndl, const char[] error, int 
 
 void DeleteAutosave(int client, int style, int track)
 {
+	g_bHasAutosave[client][style][track] = false;
+	g_fAutosaveTime[client][style][track] = 0.0;
+	g_iAutosaveDate[client][style][track] = 0;
+	
 	char sQuery[2048];
 	
 	// Delete from database
