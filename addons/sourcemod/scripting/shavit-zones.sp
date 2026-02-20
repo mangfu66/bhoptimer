@@ -1293,7 +1293,6 @@ void add_prebuilts_to_cache(const char[] classname, bool button)
 	}
 }
 
-/*
 public void OnGameFrame()
 {
 	bool search_trigger_multiple;
@@ -1350,7 +1349,6 @@ public void OnGameFrame()
 		FindEntitiesToHook("func_rot_button", ZoneForm_func_button);
 	}
 }
-*/
 
 void EntOriginString(int ent, char[] sOrigin, bool short)
 {
@@ -1424,7 +1422,6 @@ public void OnClientPutInServer(int client)
 	}
 }
 
-/*
 public void OnEntityCreated(int entity, const char[] classname)
 {
 	// trigger_once | trigger_multiple.. etc
@@ -1434,60 +1431,6 @@ public void OnEntityCreated(int entity, const char[] classname)
 		SDKHook(entity, SDKHook_EndTouch, Hook_IgnoreTriggersWhileZoning);
 		SDKHook(entity, SDKHook_Touch, Hook_IgnoreTriggersWhileZoning);
 	}
-}
-*/
-
-public void OnEntityCreated(int entity, const char[] classname)
-{
-    if (entity <= 0 || entity > 2048)
-        return;
-
-    if (StrEqual(classname, "trigger_multiple") ||
-        StrEqual(classname, "trigger_teleport") ||
-        StrEqual(classname, "func_button") ||
-        StrEqual(classname, "func_rot_button"))
-    {
-        RequestFrame(Frame_CheckNewZoneEntity);
-    }
-
-    if (StrContains(classname, "trigger_") != -1 || StrContains(classname, "player_speedmod") != -1)
-    {
-        SDKHook(entity, SDKHook_StartTouch, Hook_IgnoreTriggersWhileZoning);
-        SDKHook(entity, SDKHook_EndTouch, Hook_IgnoreTriggersWhileZoning);
-        SDKHook(entity, SDKHook_Touch, Hook_IgnoreTriggersWhileZoning);
-    }
-}
-
-public void Frame_CheckNewZoneEntity(any data)
-{
-    bool search_trigger_multiple = false;
-    bool search_trigger_teleport = false;
-    bool search_func_button = false;
-
-    for (int i = 0; i < gI_MapZones; i++)
-    {
-        if (gA_ZoneCache[i].iEntity > 0) continue; 
-
-        switch (gA_ZoneCache[i].iForm)
-        {
-            case ZoneForm_Box: if (!CreateZoneTrigger(i)) continue;
-            case ZoneForm_trigger_multiple: if (gA_ZoneCache[i].sTarget[0]) search_trigger_multiple = true;
-            case ZoneForm_trigger_teleport: if (gA_ZoneCache[i].sTarget[0]) search_trigger_teleport = true;
-            case ZoneForm_func_button: if (gA_ZoneCache[i].sTarget[0]) search_func_button = true;
-        }
-    }
-
-    if (search_trigger_multiple)
-        FindEntitiesToHook("trigger_multiple", ZoneForm_trigger_multiple);
-
-    if (search_trigger_teleport)
-        FindEntitiesToHook("trigger_teleport", ZoneForm_trigger_teleport);
-
-    if (search_func_button)
-    {
-        FindEntitiesToHook("func_button", ZoneForm_func_button);
-        FindEntitiesToHook("func_rot_button", ZoneForm_func_button);
-    }
 }
 
 Action Hook_IgnoreTriggersWhileZoning(int entity, int other)
