@@ -124,6 +124,7 @@ TopMenuObject gH_TimerCommands = INVALID_TOPMENUOBJECT;
 
 // misc cache
 bool gB_Late = false;
+bool gB_PendingZoneScan = false;
 ConVar sv_gravity = null;
 
 // cvars
@@ -943,6 +944,11 @@ public any Native_AddZone(Handle plugin, int numParams)
 		}
 	}
 
+	if (cache.iForm == ZoneForm_Box && cache.iEntity <= 0)
+	{
+		CreateZoneTrigger(gI_MapZones);
+	}
+
 	return gI_MapZones++;
 }
 
@@ -1189,6 +1195,7 @@ public void OnMapStart()
 {
 	GetLowercaseMapName(gS_Map);
 	LoadZoneSettings();
+	CreateTimer(0.5, Timer_ForceZoneScan, _, TIMER_FLAG_NO_MAPCHANGE);
 	//UnloadZones();
 
 	if (gEV_Type == Engine_TF2)
@@ -1293,6 +1300,7 @@ void add_prebuilts_to_cache(const char[] classname, bool button)
 	}
 }
 
+/*
 public void OnGameFrame()
 {
 	bool search_trigger_multiple;
@@ -1349,6 +1357,7 @@ public void OnGameFrame()
 		FindEntitiesToHook("func_rot_button", ZoneForm_func_button);
 	}
 }
+*/
 
 void EntOriginString(int ent, char[] sOrigin, bool short)
 {
@@ -1422,9 +1431,39 @@ public void OnClientPutInServer(int client)
 	}
 }
 
+/*
 public void OnEntityCreated(int entity, const char[] classname)
 {
 	// trigger_once | trigger_multiple.. etc
+	if (StrContains(classname, "trigger_") != -1 || StrContains(classname, "player_speedmod") != -1)
+	{
+		SDKHook(entity, SDKHook_StartTouch, Hook_IgnoreTriggersWhileZoning);
+		SDKHook(entity, SDKHook_EndTouch, Hook_IgnoreTriggersWhileZoning);
+		SDKHook(entity, SDKHook_Touch, Hook_IgnoreTriggersWhileZoning);
+	}
+}
+*/
+
+public void OnEntityCreated(int entity, const char[] classname)
+{
+	// 无效实体直接跳过
+	if (entity <= 0 || entity > 2048)
+		return;
+
+	// 1. 事件驱动区域绑定（零性能损耗）
+	if (StrEqual(classname, "trigger_multiple") ||
+		StrEqual(classname, "trigger_teleport") ||
+		StrEqual(classname, "func_button") ||
+		StrEqual(classname, "func_rot_button"))
+	{
+		if (!gB_PendingZoneScan)
+		{
+			gB_PendingZoneScan = true;
+			RequestFrame(Frame_CheckNewZoneEntity);
+		}
+	}
+
+	// 2. 官方原有逻辑（忽略正在画区域的玩家触发器）
 	if (StrContains(classname, "trigger_") != -1 || StrContains(classname, "player_speedmod") != -1)
 	{
 		SDKHook(entity, SDKHook_StartTouch, Hook_IgnoreTriggersWhileZoning);
@@ -1676,6 +1715,37 @@ void RefreshZones()
 	QueryLog(gH_SQL, SQL_RefreshZones_Callback, sQuery, 0, DBPrio_High);
 }
 
+// Frame_CheckNewZoneEntity - 延迟一帧执行的按需绑定逻辑
+public void Frame_CheckNewZoneEntity(any data)
+{
+	gB_PendingZoneScan = false;
+
+	bool search_trigger_multiple = false;
+	bool search_trigger_teleport = false;
+	bool search_func_button = false;
+
+	for (int i = 0; i < gI_MapZones; i++)
+	{
+		if (gA_ZoneCache[i].iEntity > 0) continue;
+
+		switch (gA_ZoneCache[i].iForm)
+		{
+			case ZoneForm_Box: if (!CreateZoneTrigger(i)) continue;
+			case ZoneForm_trigger_multiple: if (gA_ZoneCache[i].sTarget[0]) search_trigger_multiple = true;
+			case ZoneForm_trigger_teleport: if (gA_ZoneCache[i].sTarget[0]) search_trigger_teleport = true;
+			case ZoneForm_func_button: if (gA_ZoneCache[i].sTarget[0]) search_func_button = true;
+		}
+	}
+
+	if (search_trigger_multiple) FindEntitiesToHook("trigger_multiple", ZoneForm_trigger_multiple);
+	if (search_trigger_teleport) FindEntitiesToHook("trigger_teleport", ZoneForm_trigger_teleport);
+	if (search_func_button)
+	{
+		FindEntitiesToHook("func_button", ZoneForm_func_button);
+		FindEntitiesToHook("func_rot_button", ZoneForm_func_button);
+	}
+}
+
 public void SQL_RefreshZones_Callback(Database db, DBResultSet results, const char[] error, any data)
 {
 	if(results == null)
@@ -1732,7 +1802,14 @@ public void SQL_RefreshZones_Callback(Database db, DBResultSet results, const ch
 		}
 
 		Shavit_AddZone(cache);
+		
 	}
+		if (!gB_PendingZoneScan)
+		{
+			gB_PendingZoneScan = true;
+			RequestFrame(Frame_CheckNewZoneEntity);
+			CreateTimer(0.3, Timer_ForceZoneScan, _, TIMER_FLAG_NO_MAPCHANGE); // 保底
+		}
 
 #if 0
 	if (!gB_InsertedPrebuiltZones)
@@ -1762,6 +1839,16 @@ public void SQL_RefreshZones_Callback(Database db, DBResultSet results, const ch
 		}
 	}
 #endif
+}
+
+public Action Timer_ForceZoneScan(Handle timer)
+{
+	if (!gB_PendingZoneScan)
+	{
+		gB_PendingZoneScan = true;
+		RequestFrame(Frame_CheckNewZoneEntity);
+	}
+	return Plugin_Continue;
 }
 
 public void OnClientConnected(int client)
