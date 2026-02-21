@@ -617,20 +617,33 @@ public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float
         lookAhead -= (lookAhead - iEndFrame) + 1;
     }
 
-    // 计算补全起点
-    int startDraw = (oldLookAhead < lookAhead && oldLookAhead >= 0) ? oldLookAhead : lookAhead - 1;
+	// --- 核心修改：双向无缝连线算法 ---
+    int startDraw, endDraw;
+
+    if (iClosestFrame >= oldFrame) {
+        // 往前走：补全最前方新延伸出的线段
+        startDraw = (oldLookAhead >= 0) ? oldLookAhead : lookAhead - 1;
+        endDraw = lookAhead;
+    } else {
+        // 往后退：补全脚下刚刚后退经过的线段
+        startDraw = iClosestFrame;
+        endDraw = oldFrame;
+    }
+
     if (startDraw < 0) startDraw = 0;
 
     // 循环画出所有遗漏的线段
-    for (int i = startDraw + 1; i <= lookAhead; i++)
+    for (int i = startDraw + 1; i <= endDraw; i++)
     {
+        // 安全检查：防止数组越界
+        if (i >= gA_FrameCache[client].aFrames.Length) continue;
+
         frame_t replay_prevframe, replay_frame;
         gA_FrameCache[client].aFrames.GetArray(i, replay_frame, sizeof(frame_t));
         gA_FrameCache[client].aFrames.GetArray(i - 1, replay_prevframe, sizeof(frame_t));
 
         // 为每段线单独计算速度颜色
         float segmentVelDiff = GetVelocityDifference(client, i);
-        
         DrawMyRoute(client, replay_prevframe, replay_frame, segmentVelDiff, i);
     }
 }
