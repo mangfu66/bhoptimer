@@ -70,6 +70,8 @@ enum struct JumpMarker
 
 Convar gCV_NumAheadFrames = null;
 Convar gCV_VelDiffScalar = null;
+Convar gCV_SpeedScale = null;
+Convar gCV_MaxSkipFrames = null;
 
 Cookie gH_ShowRouteCookie = null;
 Cookie gH_RouteTypeCookie = null;
@@ -95,13 +97,13 @@ int gI_JumpColorIndex[MAXPLAYERS + 1];
 int gI_JumpSize[MAXPLAYERS + 1] = {MAX_JUMP_SIZE, ...};
 int gI_JumpsAhead[MAXPLAYERS + 1] = {1, ...};
 int gI_JumpsIndex[MAXPLAYERS + 1];
+
 ArrayList gA_JumpMarkerCache[MAXPLAYERS + 1];
 
 int gI_BeamSprite = -1;
 int gI_PrevStep[MAXPLAYERS + 1];
 int gI_Color[MAXPLAYERS + 1][4];
 int gI_PrevFrame[MAXPLAYERS + 1];
-
 RouteType gRT_RouteType[MAXPLAYERS + 1] = {RouteType_Auto, ...};
 
 char gS_Map[PLATFORM_MAX_PATH];
@@ -109,7 +111,6 @@ char gS_ReplayFolder[PLATFORM_MAX_PATH];
 char gS_ReplayPath[MAXPLAYERS + 1][PLATFORM_MAX_PATH];
 
 frame_cache_t gA_FrameCache[MAXPLAYERS + 1];
-
 ClosestPos gH_ClosestPos[MAXPLAYERS + 1];
 
 bool gB_Debug;
@@ -128,7 +129,7 @@ public Plugin myinfo =
     name        = "shavit - 个人路径练习 (Personal Route)",
     author      = "BoomShot",
     description = "允许玩家创建自己的练习路径。",
-    version     = "1.0.4",
+    version     = "1.0.5", // 版本号顺手更新了一下
     url         = "https://github.com/BoomShotKapow/shavit-myroute"
 };
 
@@ -173,8 +174,11 @@ public void OnPluginStart()
         Shavit_GetReplayFolderPath_Stock(gS_ReplayFolder);
     }
 
-    gCV_NumAheadFrames = new Convar("smr_ahead_frames", "75", "要在玩家前方绘制的帧数。", 0, true, 0.0);
+    // --- 默认值修改区 ---
+    gCV_NumAheadFrames = new Convar("smr_ahead_frames", "120", "要在玩家前方绘制的帧数。", 0, true, 0.0);
     gCV_VelDiffScalar = new Convar("smr_veldiff_scalar", "1", "速度差动态颜色的缩放比例。", 0, true, 0.0);
+    gCV_SpeedScale = new Convar("smr_speed_scale", "250.0", "速度到跳帧数的缩放比例（每 250 u/s 允许多推进 1 帧）。", 0, true, 1.0);
+    gCV_MaxSkipFrames = new Convar("smr_max_skip_frames", "8", "每 tick 最大允许跳过的帧数上限。", 0, true, 1.0);
 
     Convar.AutoExecConfig();
 }
@@ -255,7 +259,6 @@ public void OnMapStart()
     if(gB_Late)
     {
         gB_Late = false;
-
         for(int i = 1; i <= MaxClients; i++)
         {
             if(IsValidClient(i))
@@ -330,10 +333,11 @@ public void OnClientAuthorized(int client, const char[] auth)
 public void OnClientDisconnect(int client)
 {
     gB_LoadedReplay[client] = false;
-
+    delete gH_ClosestPos[client];
+    delete gA_FrameCache[client].aFrames;
     if(gA_JumpMarkerCache[client] != null)
     {
-        gA_JumpMarkerCache[client].Clear();
+        delete gA_JumpMarkerCache[client];
     }
 }
 
@@ -408,7 +412,6 @@ void GetStylesWithServerRecord()
         for(int style = 0; style < Shavit_GetStyleCount(); style++)
         {
             Shavit_GetReplayFilePath(style, track, gS_Map, gS_ReplayFolder, tempPath);
-
             if(FileExists(tempPath))
             {
                 char styleName[64];
@@ -465,31 +468,27 @@ bool GetMyRoute(int client)
 
     PersonalReplay replay;
     Shavit_GetPersonalReplay(client, replay, sizeof(replay));
-
     replay_header_t header;
     replay.GetHeader(header);
 
-    if(routeType == RouteType_ServerRecord || routeType == RouteType_ServerRecordAuto || (!FileExists(gS_ReplayPath[client]) && routeType == RouteType_Auto) || header.iTrack != Shavit_GetClientTrack(client))
-    {
-        Shavit_GetReplayFilePath(gI_Style[client] == -1 ? Shavit_GetBhopStyle(client) : gI_Style[client], Shavit_GetClientTrack(client), gS_Map, gS_ReplayFolder, gS_ReplayPath[client]);
+    int currentStyle = gI_Style[client] == -1 ? Shavit_GetBhopStyle(client) : gI_Style[client];
 
+    if(routeType == RouteType_ServerRecord || routeType == RouteType_ServerRecordAuto || (!FileExists(gS_ReplayPath[client]) && routeType == RouteType_Auto) || header.iTrack != Shavit_GetClientTrack(client) || header.iStyle != currentStyle)
+    {
+        Shavit_GetReplayFilePath(currentStyle, Shavit_GetClientTrack(client), gS_Map, gS_ReplayFolder, gS_ReplayPath[client]);
+        
         if(!FileExists(gS_ReplayPath[client]))
         {
             return false;
         }
     }
-
     return true;
 }
 
 bool LoadMyRoute(int client)
 {
     gB_LoadedReplay[client] = false;
-
-    if(gA_FrameCache[client].aFrames != null)
-    {
-        gA_FrameCache[client].aFrames.Clear();
-    }
+    delete gA_FrameCache[client].aFrames;
 
     if(!IsValidClient(client) || IsFakeClient(client) || !GetMyRoute(client))
     {
@@ -512,6 +511,7 @@ bool LoadMyRoute(int client)
 
     if(gA_FrameCache[client].aFrames != null && gA_FrameCache[client].aFrames.Length > 0)
     {
+        delete gH_ClosestPos[client];
         gH_ClosestPos[client] = new ClosestPos(gA_FrameCache[client].aFrames, 0, gA_FrameCache[client].iPreFrames, gA_FrameCache[client].iFrameCount);
 
         int markerId;
@@ -537,7 +537,6 @@ bool LoadMyRoute(int client)
     }
 
     ResetMyRoute(client, Shavit_GetTimerStatus(client) == Timer_Running && gH_ClosestPos[client] != null);
-
     gB_LoadedReplay[client] = true;
 
     return true;
@@ -548,60 +547,209 @@ int GetClientClosestFrame(int client)
     float clientPos[3];
     GetClientAbsOrigin(client, clientPos);
 
-    return gH_ClosestPos[client].Find(clientPos);
+    if (gA_FrameCache[client].aFrames == null || gH_ClosestPos[client] == null) 
+        return gI_PrevFrame[client];
+
+    int currentProgress = gI_PrevFrame[client];
+    int totalFrames = gA_FrameCache[client].aFrames.Length;
+
+    // --- 1. 磁吸追踪 (防震荡，保持 1 帧 1 帧绝对顺滑) ---
+    int searchStart = currentProgress - 128; 
+    if (searchStart < 0) searchStart = 0;
+    int searchEnd = currentProgress + 128;
+    if (searchEnd > totalFrames) searchEnd = totalFrames;
+
+    float minDistSq = 99999999.0;
+    int bestFrame = currentProgress;
+
+    for (int i = searchStart; i < searchEnd; i++) 
+    {
+        frame_t f;
+        gA_FrameCache[client].aFrames.GetArray(i, f, sizeof(frame_t));
+        float distSq = GetVectorDistance(clientPos, f.pos, true);
+        if (distSq < minDistSq) 
+        {
+            minDistSq = distSq;
+            bestFrame = i;
+        }
+    }
+
+    // 如果紧紧贴合当前路线(实际距离<150)，直接死锁这条时间线
+    if (minDistSq < 22500.0) 
+    {
+        return bestFrame;
+    }
+
+    // --- 2. closestpos 保底锚点 ---
+    int rawClosest = gH_ClosestPos[client].Find(clientPos);
+    float rawPos[3];
+    gA_FrameCache[client].aFrames.GetArray(rawClosest, rawPos, 3);
+
+    // --- 3. 导演剪辑：拿锚点去最后面找通关画面 ---
+    for (int i = totalFrames - 1; i > rawClosest + 64; i -= 8) 
+    {
+        frame_t futureFrame;
+        gA_FrameCache[client].aFrames.GetArray(i, futureFrame, sizeof(frame_t));
+        
+        // 发现完美通关轨迹，瞬间切过去！
+        if (GetVectorDistance(rawPos, futureFrame.pos, true) < 40000.0) 
+        {
+            return i; 
+        }
+    }
+
+    return rawClosest; 
 }
 
 public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float vel[3], const float angles[3], int weapon, int subtype, int cmdnum, int tickcount, int seed, const int mouse[2])
 {
-    if(!IsValidClient(client, true) || !gB_LoadedReplay[client] || !gB_ShowRoute[client])
-    {
-        return;
-    }
-    else if(gA_FrameCache[client].aFrames == null || (gA_FrameCache[client].aFrames.Length < 1) || gH_ClosestPos[client] == null)
-    {
-        return;
+    if(!IsValidClient(client, true) || !gB_LoadedReplay[client] || !gB_ShowRoute[client]) return;
+    if(gA_FrameCache[client].aFrames == null || (gA_FrameCache[client].aFrames.Length < 1) || gH_ClosestPos[client] == null) return;
+
+    float clientVel[3];
+    GetEntPropVector(client, Prop_Data, "m_vecAbsVelocity", clientVel); 
+    float speed2D = SquareRoot(clientVel[0] * clientVel[0] + clientVel[1] * clientVel[1]);
+
+    static float s_fCurrentAhead[MAXPLAYERS + 1];
+    static int s_iPrevAhead[MAXPLAYERS + 1];
+
+    if (speed2D < 5.0) {
+        s_fCurrentAhead[client] = 0.0; 
+        s_iPrevAhead[client] = 0;
+        // 【关键修复】：静止时也要保持后台进度更新，否则起步瞬间方向会算错
+        gI_PrevFrame[client] = GetClientClosestFrame(client); 
+        return; 
     }
 
-    int iClosestFrame = GetClientClosestFrame(client);
+    int iClosestFrame = GetClientClosestFrame(client); 
     int iEndFrame = gA_FrameCache[client].aFrames.Length - 1;
+    int oldFrame = gI_PrevFrame[client];
+    int frameDiff = iClosestFrame - oldFrame;
 
-    if(iClosestFrame == gI_PrevFrame[client])
-    {
-        return;
-    }
+    int maxSkip = RoundToFloor(speed2D / gCV_SpeedScale.FloatValue) + 1;
+    if(maxSkip > gCV_MaxSkipFrames.IntValue) maxSkip = gCV_MaxSkipFrames.IntValue;
 
-    if((iClosestFrame - gI_PrevFrame[client]) > 1)
-    {
-        iClosestFrame = gI_PrevFrame[client] + 1;
+    static int s_iFillStart[MAXPLAYERS + 1];
+    static int s_iFillEnd[MAXPLAYERS + 1];
+    static float s_fLastRefresh[MAXPLAYERS + 1];
+
+    bool bTriggerRefresh = false;
+
+    if (frameDiff > 200 || frameDiff < -200) {
+        gI_PrevFrame[client] = iClosestFrame; 
+        gI_JumpsIndex[client] = 0;
+        oldFrame = iClosestFrame; 
+        bTriggerRefresh = true; 
+    } else if (frameDiff > maxSkip) {
+        iClosestFrame = oldFrame + maxSkip;
+    } else if (frameDiff < -maxSkip) {
+        iClosestFrame = oldFrame - maxSkip;
+        gI_JumpsIndex[client] = 0;
     }
 
     gI_PrevFrame[client] = iClosestFrame;
 
-    int lookAhead = iClosestFrame + gCV_NumAheadFrames.IntValue;
-
-    if(iClosestFrame == iEndFrame)
-    {
-        return;
+    // ==========================================
+    // 动态生长算法 (修复倒退违和感)
+    // ==========================================
+    float targetAhead = float(gCV_NumAheadFrames.IntValue);
+    
+    if (iClosestFrame < oldFrame && s_fCurrentAhead[client] < targetAhead) {
+        // 【修复倒退逻辑】：如果玩家在倒退，且线没长满，直接瞬间让线达到全长
+        // 杜绝线尖端逆向“往前射出”的橡皮筋效应
+        s_fCurrentAhead[client] = targetAhead;
+        bTriggerRefresh = true; 
+    } 
+    else if (s_fCurrentAhead[client] < targetAhead) {
+        // 正常前进时，保留完美的光剑拔出动画
+        s_fCurrentAhead[client] += 6.0; 
+        if (s_fCurrentAhead[client] > targetAhead) {
+            s_fCurrentAhead[client] = targetAhead;
+        }
     }
-    else if(lookAhead >= iEndFrame)
-    {
-        lookAhead -= (lookAhead - iEndFrame) + 1;
+    
+    int currentAhead = RoundToFloor(s_fCurrentAhead[client]);
+    int oldAhead = s_iPrevAhead[client];
+    s_iPrevAhead[client] = currentAhead;
+
+    int lookAhead = iClosestFrame + currentAhead;
+    int oldLookAhead = oldFrame + oldAhead;
+    if(lookAhead >= iEndFrame) lookAhead = iEndFrame - 1;
+    if(oldLookAhead >= iEndFrame) oldLookAhead = iEndFrame - 1;
+
+    // ==========================================
+    // 智能动态时序
+    // ==========================================
+    float tickInterval = GetTickInterval();
+    float beamLifeTime = 1.2; 
+    float smartRefreshInterval = beamLifeTime - (tickInterval * 4.0);
+
+    if (currentAhead >= targetAhead && GetEngineTime() - s_fLastRefresh[client] > smartRefreshInterval) {
+        bTriggerRefresh = true;
     }
 
-    frame_t replay_prevframe, replay_frame;
-    gA_FrameCache[client].aFrames.GetArray(lookAhead, replay_frame, sizeof(frame_t));
-    gA_FrameCache[client].aFrames.GetArray(lookAhead <= 0 ? 0 : lookAhead - 1, replay_prevframe, sizeof(frame_t));
+    if (bTriggerRefresh) {
+        s_iFillStart[client] = iClosestFrame;
+        s_iFillEnd[client] = lookAhead;
+        s_fLastRefresh[client] = GetEngineTime(); 
+    }
 
-    DrawMyRoute(client, replay_prevframe, replay_frame, GetVelocityDifference(client, iClosestFrame));
+    // ==========================================
+    // 极简绘图循环
+    // ==========================================
+    if (lookAhead > oldLookAhead) {
+        int startD = oldLookAhead;
+        if (startD < 0) startD = 0;
+        for (int i = startD + 1; i <= lookAhead; i++) {
+            if (i >= gA_FrameCache[client].aFrames.Length || i < 1) continue;
+            if (i > s_iFillStart[client] && i <= s_iFillEnd[client]) continue; 
+            frame_t replay_prevframe, replay_frame;
+            gA_FrameCache[client].aFrames.GetArray(i, replay_frame, sizeof(frame_t));
+            gA_FrameCache[client].aFrames.GetArray(i - 1, replay_prevframe, sizeof(frame_t));
+            DrawMyRoute(client, replay_prevframe, replay_frame, GetVelocityDifference(client, i), i);
+        }
+    }
+
+    if (iClosestFrame < oldFrame) {
+        int startFoot = iClosestFrame;
+        if (startFoot < 0) startFoot = 0;
+        for (int i = startFoot + 1; i <= oldFrame; i++) {
+            if (i >= gA_FrameCache[client].aFrames.Length || i < 1) continue;
+            if (i > s_iFillStart[client] && i <= s_iFillEnd[client]) continue;
+            frame_t replay_prevframe, replay_frame;
+            gA_FrameCache[client].aFrames.GetArray(i, replay_frame, sizeof(frame_t));
+            gA_FrameCache[client].aFrames.GetArray(i - 1, replay_prevframe, sizeof(frame_t));
+            DrawMyRoute(client, replay_prevframe, replay_frame, GetVelocityDifference(client, i), i);
+        }
+    }
+
+    // ==========================================
+    // 异步高速补漆
+    // ==========================================
+    if (s_iFillStart[client] < s_iFillEnd[client]) {
+        // 【关键提速】：每Tick画 60 根，2帧内瞬间画完全部，肉眼绝对看不出“往前刷”的方向感
+        int fillLimit = s_iFillStart[client] + 60; 
+        if (fillLimit > s_iFillEnd[client]) fillLimit = s_iFillEnd[client];
+
+        for (int i = s_iFillStart[client] + 1; i <= fillLimit; i++) {
+            if (i >= gA_FrameCache[client].aFrames.Length || i < 1) continue;
+            frame_t replay_prevframe, replay_frame;
+            gA_FrameCache[client].aFrames.GetArray(i, replay_frame, sizeof(frame_t));
+            gA_FrameCache[client].aFrames.GetArray(i - 1, replay_prevframe, sizeof(frame_t));
+            DrawMyRoute(client, replay_prevframe, replay_frame, GetVelocityDifference(client, i), i);
+        }
+        s_iFillStart[client] = fillLimit; 
+    }
 }
 
-void DrawMyRoute(int client, frame_t prev, frame_t cur, float velDiff)
+void DrawMyRoute(int client, frame_t prev, frame_t cur, float velDiff, int lookAhead)
 {
     UpdateColor(client, velDiff);
 
     if(gB_ShowPath[client])
     {
-        BeamEffect(client, prev.pos, cur.pos, 0.7, gI_PathSize[client] / float(MAX_BEAM_WIDTH), gI_PathColorIndex[client] == -1 ? gI_Color[client] : gI_ColorIndex[gI_PathColorIndex[client]]);
+        // --- 修改光束存留时间为 1.2 秒 ---
+        BeamEffect(client, prev.pos, cur.pos, 1.2, gI_PathSize[client] / float(MAX_BEAM_WIDTH), gI_PathColorIndex[client] == -1 ? gI_Color[client] : gI_ColorIndex[gI_PathColorIndex[client]]);
     }
 
     if(!gB_ShowJumps[client] || (gA_JumpMarkerCache[client] != null && gA_JumpMarkerCache[client].Length < 1))
@@ -609,17 +757,40 @@ void DrawMyRoute(int client, frame_t prev, frame_t cur, float velDiff)
         return;
     }
 
-    int iClosestFrame = GetClientClosestFrame(client);
+    int startIdx = gI_JumpsIndex[client];
 
-    for(int i = 0; i < gA_JumpMarkerCache[client].Length; i++)
+    if(startIdx >= gA_JumpMarkerCache[client].Length)
+    {
+        startIdx = 0;
+    }
+
+    bool foundAhead = false;
+
+    for(int i = startIdx; i < gA_JumpMarkerCache[client].Length; i++)
     {
         JumpMarker current;
         gA_JumpMarkerCache[client].GetArray(i, current, sizeof(current));
 
-        if(current.frameNum >= iClosestFrame)
+        if(current.frameNum >= lookAhead)
         {
             gI_JumpsIndex[client] = current.id;
+            foundAhead = true;
             break;
+        }
+    }
+
+    if(!foundAhead && startIdx > 0)
+    {
+        for(int i = startIdx - 1; i >= 0; i--)
+        {
+            JumpMarker current;
+            gA_JumpMarkerCache[client].GetArray(i, current, sizeof(current));
+            
+            if(current.frameNum <= lookAhead)
+            {
+                gI_JumpsIndex[client] = current.id;
+                break;
+            }
         }
     }
 
@@ -635,38 +806,13 @@ void DrawMyRoute(int client, frame_t prev, frame_t cur, float velDiff)
     gF_Delay[client] = GetEngineTime();
 
     JumpMarker marker;
-    gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client], marker, sizeof(marker));
-    marker.Draw(client, gI_ColorIndex[gI_JumpColorIndex[client]]);
 
     int max = gA_JumpMarkerCache[client].Length;
+    int jumpsToShow = gI_JumpsAhead[client] + 1;
 
-    if(gI_JumpsAhead[client] >= 1 && gI_JumpsIndex[client] + 1 < max)
+    for(int i = 0; i < jumpsToShow && (gI_JumpsIndex[client] + i) < max; i++)
     {
-        gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client] + 1, marker, sizeof(marker));
-        marker.Draw(client, gI_ColorIndex[gI_JumpColorIndex[client]]);
-    }
-
-    if(gI_JumpsAhead[client] >= 2 && (gI_JumpsIndex[client] + 2 < max))
-    {
-        gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client] + 2, marker, sizeof(marker));
-        marker.Draw(client, gI_ColorIndex[gI_JumpColorIndex[client]]);
-    }
-
-    if(gI_JumpsAhead[client] >= 3 && (gI_JumpsIndex[client] + 3 < max))
-    {
-        gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client] + 3, marker, sizeof(marker));
-        marker.Draw(client, gI_ColorIndex[gI_JumpColorIndex[client]]);
-    }
-
-    if(gI_JumpsAhead[client] >= 4 && (gI_JumpsIndex[client] + 4 < max))
-    {
-        gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client] + 4, marker, sizeof(marker));
-        marker.Draw(client, gI_ColorIndex[gI_JumpColorIndex[client]]);
-    }
-
-    if(gI_JumpsAhead[client] >= 5 && (gI_JumpsIndex[client] + 5 < max))
-    {
-        gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client] + 5, marker, sizeof(marker));
+        gA_JumpMarkerCache[client].GetArray(gI_JumpsIndex[client] + i, marker, sizeof(marker));
         marker.Draw(client, gI_ColorIndex[gI_JumpColorIndex[client]]);
     }
 }
@@ -782,7 +928,6 @@ void ResetMyRoute(int client, bool closestFrame = false)
     if(closestFrame)
     {
         UpdateColor(client, GetVelocityDifference(client, iClosestFrame));
-
         return;
     }
 
@@ -808,8 +953,10 @@ void UpdateColor(int client, float velDiff)
 
     gI_PrevStep[client] = stepsize;
 
-    gI_Color[client][0] -= stepsize;
-    gI_Color[client][1] += stepsize;
+    int baseColor[4] = {0, 255, 0, 255};
+
+    gI_Color[client][0] = baseColor[0] - stepsize;
+    gI_Color[client][1] = baseColor[1] + stepsize;
     gI_Color[client][2] = 0;
     gI_Color[client][3] = gI_PathOpacity[client];
 
@@ -849,7 +996,9 @@ float GetVelocityDifference(int client, int frame)
     int style = Shavit_GetBhopStyle(client);
 
     float replayVel[3];
-    MakeVectorFromPoints(fReplayClosestPos, fReplayPrevPos, replayVel);
+
+    MakeVectorFromPoints(fReplayPrevPos, fReplayClosestPos, replayVel);
+
     ScaleVector(replayVel, (1.0 / GetTickInterval()) / Shavit_GetStyleSettingFloat(style, "speed") / Shavit_GetStyleSettingFloat(style, "timescale"));
 
     return (SquareRoot(Pow(clientVel[0], 2.0) + Pow(clientVel[1], 2.0))) - (SquareRoot(Pow(replayVel[0], 2.0) + Pow(replayVel[1], 2.0)));
@@ -900,6 +1049,7 @@ void GetPathType(int client, char[] buffer, int length)
 bool UpdateClientCookie(int client, Cookie cookie, const char[] newvalue = "")
 {
     char value[4];
+
     cookie.Get(client, value, sizeof(value));
 
     if(newvalue[0] == '\0')
@@ -924,6 +1074,7 @@ bool CreateMyRouteMenu(int client, int page = 0)
 
     char type[64], display[128];
     GetClientRouteType(client, type, sizeof(type));
+
     FormatEx(display, sizeof(display), "数据源类型: [%s]", type);
     menu.AddItem("type", display);
 
@@ -936,6 +1087,7 @@ bool CreateMyRouteMenu(int client, int page = 0)
         else
         {
             char styleName[64];
+
             Shavit_GetStyleStrings(gI_Style[client] == -1 ? Shavit_GetBhopStyle(client) : gI_Style[client], sStyleName, styleName, sizeof(styleName));
 
             int index = gA_Styles[Shavit_GetClientTrack(client)].FindString(styleName);
@@ -973,6 +1125,7 @@ public int MyRoute_MenuHandler(Menu menu, MenuAction action, int param1, int par
         case MenuAction_Select:
         {
             char info[64];
+
             menu.GetItem(param2, info, sizeof(info));
 
             if(StrEqual(info, "enabled"))
@@ -1054,6 +1207,7 @@ bool CreatePathSettingsMenu(int client, int page = 0)
     FormatEx(display, sizeof(display), "轨迹粗细: [%d]", gI_PathSize[client]);
     menu.AddItem("path_size", display, ITEMDRAW_DISABLED);
     menu.AddItem("increment", "++ 增加粗细 ++");
+
     menu.AddItem("decrement", "-- 减小粗细 --");
 
     FormatEx(display, sizeof(display), "光束透明度: [%d]", gI_PathOpacity[client]);
@@ -1072,6 +1226,7 @@ public int PathSettings_MenuHandler(Menu menu, MenuAction action, int param1, in
         case MenuAction_Select:
         {
             char info[64];
+
             menu.GetItem(param2, info, sizeof(info));
 
             char newvalue[4];
@@ -1096,6 +1251,7 @@ public int PathSettings_MenuHandler(Menu menu, MenuAction action, int param1, in
                 }
 
                 IntToString(gI_PathSize[param1], newvalue, sizeof(newvalue));
+
                 UpdateClientCookie(param1, gH_PathSizeCookie, newvalue);
             }
             else if(StrEqual(info, "path_type"))
@@ -1127,6 +1283,7 @@ public int PathSettings_MenuHandler(Menu menu, MenuAction action, int param1, in
                 }
 
                 IntToString(gI_PathOpacity[param1], newvalue, sizeof(newvalue));
+
                 UpdateClientCookie(param1, gH_PathOpacityCookie, newvalue);
             }
 
@@ -1152,6 +1309,7 @@ public int PathColor_MenuHandler(Menu menu, MenuAction action, int param1, int p
         case MenuAction_Select:
         {
             char info[64];
+
             menu.GetItem(param2, info, sizeof(info));
 
             int color = StringToInt(info);
@@ -1189,6 +1347,7 @@ bool CreateJumpMarkersMenu(int client, int page = 0)
 
     FormatEx(display, sizeof(display), "标记大小: [%d]", gI_JumpSize[client]);
     menu.AddItem("marker_size", display, ITEMDRAW_DISABLED);
+
     menu.AddItem("increment", "++ 增加标记大小 ++");
     menu.AddItem("decrement", "-- 减小标记大小 --");
 
@@ -1210,6 +1369,7 @@ public int JumpMarkers_MenuHandler(Menu menu, MenuAction action, int param1, int
         case MenuAction_Select:
         {
             char info[64];
+
             menu.GetItem(param2, info, sizeof(info));
 
             char newvalue[4];
@@ -1234,6 +1394,7 @@ public int JumpMarkers_MenuHandler(Menu menu, MenuAction action, int param1, int
                 }
 
                 IntToString(gI_JumpSize[param1], newvalue, sizeof(newvalue));
+
                 UpdateClientCookie(param1, gH_JumpSizeCookie, newvalue);
             }
             else if(StrEqual(info, "marker_color"))
@@ -1250,6 +1411,7 @@ public int JumpMarkers_MenuHandler(Menu menu, MenuAction action, int param1, int
                 }
 
                 IntToString(gI_JumpsAhead[param1], newvalue, sizeof(newvalue));
+
                 UpdateClientCookie(param1, gH_JumpsAheadCookie, newvalue);
             }
 
@@ -1275,6 +1437,7 @@ public int JumpMarkerColor_MenuHandler(Menu menu, MenuAction action, int param1,
         case MenuAction_Select:
         {
             char info[64];
+
             menu.GetItem(param2, info, sizeof(info));
 
             int color = StringToInt(info);
@@ -1330,6 +1493,7 @@ public Action Command_ResetRoute(int client, int args)
 public Action Command_Debug(int client, int args)
 {
     gB_Debug = !gB_Debug;
+
     ReplyToCommand(client, "路径插件调试模式: %s", gB_Debug ? "开启" : "关闭");
 
     return Plugin_Handled;
@@ -1339,6 +1503,7 @@ bool LoadReplayCache2(frame_cache_t cache, int track, const char[] path, const c
 {
     bool success = false;
     replay_header_t header;
+
     File fFile = ReadReplayHeader(path, header);
 
     if (fFile != null)
