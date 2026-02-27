@@ -2983,7 +2983,7 @@ public void SQL_InsertUser_Callback(Database db, DBResultSet results, const char
 // but we have easy gamedata for Teleport so whatever...
 public MRESReturn DHooks_OnTeleport(int pThis, DHookParam hParams)
 {
-	if (gCV_HijackTeleportAngles.BoolValue && !hParams.IsNull(2) && IsPlayerAlive(pThis))
+	if (gCV_HijackTeleportAngles.BoolValue && !hParams.IsNull(2) && IsPlayerAlive(pThis) && !IsFakeClient(pThis))
 	{
 		float latency = GetClientLatency(pThis, NetFlow_Both);
 
@@ -3106,11 +3106,11 @@ public void PreThinkPost(int client)
 	{
 		if (!gB_Zones || !Shavit_InsideZone(client, Zone_Airaccelerate, gA_Timers[client].iTimerTrack))
 		{
-			sv_airaccelerate.FloatValue = GetStyleSettingFloat(gA_Timers[client].bsStyle, "airaccelerate");
+			UpdateAiraccelerate(client, GetStyleSettingFloat(gA_Timers[client].bsStyle, "airaccelerate"));
 		}
 		else
 		{
-			sv_airaccelerate.FloatValue = gF_ZoneAiraccelerate[client];
+			UpdateAiraccelerate(client, gF_ZoneAiraccelerate[client]);
 		}
 
 		if(sv_enablebunnyhopping != null)

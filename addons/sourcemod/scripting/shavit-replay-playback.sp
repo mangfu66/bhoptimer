@@ -1698,11 +1698,15 @@ public void Shavit_OnStyleChanged(int client, int oldstyle, int newstyle, int tr
 
 public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, int strafes, float sync, int track, float oldtime, float perfs, float avgvel, float maxvel, int timestamp, bool isbestreplay, bool istoolong, ArrayList paths, ArrayList frames, int preframes, int postframes, const char[] name)
 {
-	if (!isbestreplay || istoolong)
+	// 只有 paths 为空（没有保存任何录像）才跳过
+	if (paths.Length == 0)
 	{
 		return;
 	}
 
+	if (isbestreplay && !istoolong)
+	{
+	// WR：直接克隆内存帧，更新缓存，重建 ClosestPos
 	delete gA_FrameCache[style][track].aFrames;
 	gA_FrameCache[style][track].aFrames = view_as<ArrayList>(CloneHandle(frames));
 	gA_FrameCache[style][track].iFrameCount = frames.Length - preframes - postframes;
@@ -1748,6 +1752,13 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
 #endif
 	}
 #endif
+	} // end if (isbestreplay && !istoolong)
+	else
+	{
+		// 非 WR TopN 录像：重载 rank1 缓存，停止所有 bot
+		// bot 重启后会从各自的 rank 文件重新加载（文件已被 recorder 移位）
+		UnloadReplay(style, track, true, false);
+	}
 }
 
 int InternalCreateReplayBot()

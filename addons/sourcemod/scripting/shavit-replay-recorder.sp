@@ -207,6 +207,44 @@ public void OnLibraryRemoved(const char[] name)
 public void OnMapStart()
 {
 	GetLowercaseMapName(gS_Map);
+	CleanupStaleTmpReplays();
+}
+
+// 清理上次服务器崩溃遗留的 .tmp 录像文件
+void CleanupStaleTmpReplays()
+{
+	if (gS_ReplayFolder[0] == '\0')
+		return;
+
+	for (int style = 0; style < STYLE_LIMIT; style++)
+	{
+		char sDir[PLATFORM_MAX_PATH];
+		FormatEx(sDir, sizeof(sDir), "%s/%d", gS_ReplayFolder, style);
+
+		if (!DirExists(sDir))
+			continue;
+
+		DirectoryListing dir = OpenDirectory(sDir);
+		if (dir == null)
+			continue;
+
+		char sFile[PLATFORM_MAX_PATH];
+		FileType ftype;
+		while (dir.GetNext(sFile, sizeof(sFile), ftype))
+		{
+			if (ftype != FileType_File)
+				continue;
+			int len = strlen(sFile);
+			if (len > 4 && strcmp(sFile[len - 4], ".tmp") == 0)
+			{
+				char sFullPath[PLATFORM_MAX_PATH];
+				FormatEx(sFullPath, sizeof(sFullPath), "%s/%s", sDir, sFile);
+				DeleteFile(sFullPath);
+				LogMessage("[replay-recorder] Cleaned up stale tmp: %s", sFullPath);
+			}
+		}
+		delete dir;
+	}
 }
 
 // Helper function to check if the current track qualifies for multi-replay
@@ -270,14 +308,6 @@ void GetReplayPathForRank(int style, int track, int rank, char[] path, int maxle
 {
 	#pragma unused maxlen
 	Shavit_GetReplayFilePathForRank(style, track, rank, gS_Map, gS_ReplayFolder, path);
-}
-
-// Check if a replay file exists for a specific rank
-bool ReplayExistsForRank(int style, int track, int rank)
-{
-	char sPath[PLATFORM_MAX_PATH];
-	GetReplayPathForRank(style, track, rank, sPath, sizeof(sPath));
-	return FileExists(sPath);
 }
 
 // Delete replay file for a specific rank
@@ -575,98 +605,32 @@ void DoReplaySaverCallbacks(int iSteamID, int client, int style, float time, int
 
 	if (makeReplay)
 	{
-		// Handle Top-N replay shifting if enabled
-		if (topNEnabled)
-		{
-			// Use the pre-calculated file-based rank to determine where to shift from
-			// This ensures we shift based on actual file positions, not database ranks
-			
-			// Only shift if the new WR fits within Top-N (fileRank between 1 and topNCount)
-			if (fileRank <= topNCount)
-			{
-				// Shift existing replays down (e.g., rank 3→4, rank 2→3)
-				// Start from the bottom and work our way up to avoid overwriting
-				for (int rank = topNCount; rank > fileRank; rank--)
-				{
-					if (ReplayExistsForRank(style, track, rank - 1))
-					{
-						char oldPath[PLATFORM_MAX_PATH], newPath[PLATFORM_MAX_PATH];
-						GetReplayPathForRank(style, track, rank - 1, oldPath, sizeof(oldPath));
-						GetReplayPathForRank(style, track, rank, newPath, sizeof(newPath));
-						
-						// Delete the target file if it exists
-						if (FileExists(newPath))
-						{
-							DeleteFile(newPath);
-						}
-						
-						// Rename (move) the file
-						RenameFile(newPath, oldPath);
-					}
-				}
-				
-				// Delete any replays that exceed topNCount
-				// Check a buffer of 5 additional ranks to clean up any orphaned replay files
-				for (int rank = topNCount + 1; rank <= topNCount + 5; rank++)
-				{
-					DeleteReplayForRank(style, track, rank);
-				}
-			}
-		}
-		
-		// Save the new WR replay (always at rank 1)
-		char wrpath[PLATFORM_MAX_PATH];
+		// 排名移位推迟到 floppy 回调，这里只写 .tmp 路径
+		char wrpath[PLATFORM_MAX_PATH], wrtmp[PLATFORM_MAX_PATH];
 		GetReplayPathForRank(style, track, 1, wrpath, sizeof(wrpath));
-		paths.PushString(wrpath);
+		FormatEx(wrtmp, sizeof(wrtmp), "%s.tmp", wrpath);
+		paths.PushString(wrtmp);
+		fileRank = 1; // WR 始终写到 rank1，回调里做排名移位 + rename
 	}
 	else if (topNEnabled && !isTooLong)
 	{
 		// Use the pre-calculated file-based rank to determine where this replay should be saved
-		
+
 		// Only save if it fits within Top-N (fileRank <= topNCount)
 		// Skip if fileRank is 1 because that would be a WR (faster than all existing replays),
 		// which is already handled by the makeReplay branch above
 		if (fileRank > 1 && fileRank <= topNCount)
 		{
 			// Bug 3 Fix: Only save Top-N replay if player actually improved their PB
-			// If oldtime > 0.0 && time >= oldtime, player didn't beat their PB, so skip saving
-			// (Removed return to ensure forwards are called)
-			if (oldtime > 0.0 && time >= oldtime)
+			// paths 为空时走 paths.Length==0 分支，forward 仍会被调用
+			if (!(oldtime > 0.0 && time >= oldtime))
 			{
-				// Player didn't beat their PB, don't save a new replay
-				// Continue to allow forwards to be called
+				// 排名移位推迟到 floppy 回调，这里只写 .tmp 路径
+				char rankpath[PLATFORM_MAX_PATH], ranktmp[PLATFORM_MAX_PATH];
+				GetReplayPathForRank(style, track, fileRank, rankpath, sizeof(rankpath));
+				FormatEx(ranktmp, sizeof(ranktmp), "%s.tmp", rankpath);
+				paths.PushString(ranktmp);
 			}
-			
-			// This is not a WR, but it qualifies for Top-N
-			// Shift replays down from the insertion point
-			for (int rank = topNCount; rank > fileRank; rank--)
-			{
-				if (ReplayExistsForRank(style, track, rank - 1))
-				{
-					char oldPath[PLATFORM_MAX_PATH], newPath[PLATFORM_MAX_PATH];
-					GetReplayPathForRank(style, track, rank - 1, oldPath, sizeof(oldPath));
-					GetReplayPathForRank(style, track, rank, newPath, sizeof(newPath));
-					
-					if (FileExists(newPath))
-					{
-						DeleteFile(newPath);
-					}
-					
-					RenameFile(newPath, oldPath);
-				}
-			}
-			
-			// Delete any replays that exceed topNCount
-			// Check a buffer of 5 additional ranks to clean up any orphaned replay files
-			for (int rank = topNCount + 1; rank <= topNCount + 5; rank++)
-			{
-				DeleteReplayForRank(style, track, rank);
-			}
-			
-			// Save this replay at its file-based rank position
-			char rankpath[PLATFORM_MAX_PATH];
-			GetReplayPathForRank(style, track, fileRank, rankpath, sizeof(rankpath));
-			paths.PushString(rankpath);
 		}
 	}
 
@@ -754,6 +718,7 @@ void DoReplaySaverCallbacks(int iSteamID, int client, int style, float time, int
 	dp.WriteCell(gI_PlayerPrerunFrames[client]);
 	dp.WriteCell(postframes);
 	dp.WriteString(sName);
+	dp.WriteCell(fileRank); // field 20: 延迟排名移位用
 
 	if (gB_Floppy)
 	{
@@ -774,14 +739,13 @@ void DoReplaySaverCallbacks(int iSteamID, int client, int style, float time, int
 		bool saved = false;
 		for (int i = 0, size = paths.Length; i < size; ++i)
 		{
-			char path[PLATFORM_MAX_PATH], tmp[PLATFORM_MAX_PATH];
+			// path 已经是 .tmp 路径，直接写入；回调里做排名移位 + rename .tmp→final
+			char path[PLATFORM_MAX_PATH];
 			paths.GetString(i, path, sizeof(path));
-			FormatEx(tmp, sizeof(tmp), "%s.tmp", path);
 
-			if (SaveReplay(style, track, time, iSteamID, gI_PlayerPrerunFrames[client], playerrecording, gI_PlayerFrames[client], postframes, fZoneOffset, tmp))
+			if (SaveReplay(style, track, time, iSteamID, gI_PlayerPrerunFrames[client], playerrecording, gI_PlayerFrames[client], postframes, fZoneOffset, path))
 			{
 				saved = true;
-				RenameFile(path, tmp);
 			}
 		}
 
@@ -794,6 +758,27 @@ void DoReplaySaverCallbacks(int iSteamID, int client, int style, float time, int
 void FloppyAsynchronouslySavedMyReplayWhichWasNiceOfThem(bool saved, any value)
 {
 	DataPack dp = value;
+
+	if (!saved)
+	{
+		// 跳到 paths / playerrecording 字段清理 handle
+		dp.Reset();
+		for (int i = 0; i < 14; i++) dp.ReadCell();
+		ArrayList paths = dp.ReadCell();
+		ArrayList playerrecording = dp.ReadCell();
+		delete paths;
+		delete playerrecording;
+		delete dp;
+		LogError("Failed to save replay... Skipping OnReplaySaved");
+		return;
+	}
+
+	// 把 dp 直接交给下一帧 timer，floppy 回调立即返回，不阻塞主线程
+	CreateTimer(0.0, Timer_DeferredRankShift, dp);
+}
+
+public Action Timer_DeferredRankShift(Handle timer, DataPack dp)
+{
 	dp.Reset();
 
 	int client = GetClientFromSerial(dp.ReadCell());
@@ -816,12 +801,35 @@ void FloppyAsynchronouslySavedMyReplayWhichWasNiceOfThem(bool saved, any value)
 	int postframes = dp.ReadCell();
 	char sName[MAX_NAME_LENGTH];
 	dp.ReadString(sName, sizeof(sName));
+	int fileRank = dp.ReadCell();
+	delete dp;
 
-	if (!saved)
+	// 排名移位 + rename .tmp → 最终路径
+	if (fileRank > 0 && paths.Length > 0)
 	{
-		LogError("Failed to save replay... Skipping OnReplaySaved");
-		delete playerrecording; // importante!
-		return;
+		int topNCount = gCV_TopN_Count.IntValue;
+		bool topNEnabled = (topNCount > 1 && IsTopNEnabledForTrack(track) && IsTopNEnabledForMap());
+
+		if (topNEnabled && fileRank <= topNCount)
+		{
+			for (int rank = topNCount; rank > fileRank; rank--)
+			{
+				char oldPath[PLATFORM_MAX_PATH], newPath[PLATFORM_MAX_PATH];
+				GetReplayPathForRank(style, track, rank - 1, oldPath, sizeof(oldPath));
+				GetReplayPathForRank(style, track, rank, newPath, sizeof(newPath));
+				if (FileExists(oldPath))
+				{
+					DeleteFile(newPath);
+					RenameFile(newPath, oldPath);
+				}
+			}
+		}
+
+		char tmpPath[PLATFORM_MAX_PATH], finalPath[PLATFORM_MAX_PATH];
+		paths.GetString(0, tmpPath, sizeof(tmpPath));
+		GetReplayPathForRank(style, track, fileRank, finalPath, sizeof(finalPath));
+		RenameFile(finalPath, tmpPath);
+		paths.SetString(0, finalPath);
 	}
 
 	Call_StartForward(gH_OnReplaySaved);
@@ -847,6 +855,9 @@ void FloppyAsynchronouslySavedMyReplayWhichWasNiceOfThem(bool saved, any value)
 	Call_Finish();
 
 	delete playerrecording;
+	delete paths;
+
+	return Plugin_Stop;
 }
 
 public void Shavit_OnFinish(int client, int style, float time, int jumps, int strafes, float sync, int track, float oldtime, float perfs, float avgvel, float maxvel, int timestamp)
@@ -871,7 +882,6 @@ public void Shavit_OnFinish(int client, int style, float time, int jumps, int st
 	// This is needed because shavit-wr may write the new time to DB, affecting rank calculation
 	// We always calculate the rank here so it's available for both WR and Top-N replay logic
 	int playerRank = Shavit_GetRankForTime(style, time, track);
-	int topNCount = gCV_TopN_Count.IntValue;
 
 	if (gCV_PlaybackPostRunTime.FloatValue > 0.0)
 	{

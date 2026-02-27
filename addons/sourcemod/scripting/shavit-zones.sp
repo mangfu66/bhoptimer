@@ -79,8 +79,10 @@ enum struct zone_settings_t
 // 0 - nothing
 // 1 - wait for E tap to setup first coord
 // 2 - wait for E tap to setup second coord
-// 3 - confirm
+// 3 - adjust height with mouse look
+// 4 - confirm
 int gI_MapStep[MAXPLAYERS+1];
+float gF_HeightBaseZ[MAXPLAYERS+1]; // Step 3: base Z when height adjustment starts
 Handle gH_StupidTimer[MAXPLAYERS+1];
 int gI_CurrentTraceEntity = 0;
 zone_cache_t gA_EditCache[MAXPLAYERS+1];
@@ -96,6 +98,10 @@ int gI_GridSnap[MAXPLAYERS+1];
 bool gB_SnapToWall[MAXPLAYERS+1];
 bool gB_CursorTracing[MAXPLAYERS+1];
 bool gB_IgnoreTriggers[MAXPLAYERS+1];
+
+// trigger列表（用于hookzone的列表模式）
+ArrayList gA_AllTriggers = null;
+int gI_SelectedTrigger[MAXPLAYERS+1];
 
 int gI_LatestTeleportTick[MAXPLAYERS+1];
 
@@ -1244,6 +1250,48 @@ public void Shavit_LoadZonesHere()
 		add_prebuilts_to_cache("func_button", true);
 		add_prebuilts_to_cache("func_rot_button", true);
 	}
+
+	// 扫描地图所有trigger用于hookzone列表模式
+	ScanAllTriggers();
+}
+
+void ScanAllTriggers()
+{
+	delete gA_AllTriggers;
+	gA_AllTriggers = new ArrayList();
+
+	static const char scan_classes[][] = {
+		"trigger_multiple",
+		"trigger_teleport",
+		"trigger_push",
+		"trigger_hurt",
+		"func_button",
+		"func_rot_button",
+		"func_door",
+		"func_brush",
+		"func_wall"
+	};
+
+	for(int c = 0; c < sizeof(scan_classes); c++)
+	{
+		int ent = -1;
+		int count = 1;
+		while((ent = FindEntityByClassname(ent, scan_classes[c])) != -1)
+		{
+			// 给没名字的实体自动命名
+			char targetname[128];
+			GetEntPropString(ent, Prop_Data, "m_iName", targetname, sizeof(targetname));
+
+			if(strlen(targetname) == 0)
+			{
+				FormatEx(targetname, sizeof(targetname), "%s_#%d", scan_classes[c], count);
+				DispatchKeyValue(ent, "targetname", targetname);
+			}
+
+			gA_AllTriggers.Push(ent);
+			count++;
+		}
+	}
 }
 
 void add_prebuilts_to_cache(const char[] classname, bool button)
@@ -1529,6 +1577,17 @@ void UnhookZone(zone_cache_t cache)
 		SDKUnhook(entity, SDKHook_UsePost, UsePost_HookedButton);
 	}
 	else if (cache.iForm == ZoneForm_Box)
+	{
+		SDKUnhook(entity, SDKHook_StartTouchPost, StartTouchPost);
+		SDKUnhook(entity, SDKHook_EndTouchPost, EndTouchPost);
+		SDKUnhook(entity, SDKHook_TouchPost, TouchPost);
+
+		if (cache.iType == Zone_Speedmod)
+		{
+			SDKUnhook(entity, SDKHook_StartTouch, SameTrack_StartTouch_er);
+		}
+	}
+	else if (cache.iForm == ZoneForm_trigger_multiple || cache.iForm == ZoneForm_trigger_teleport)
 	{
 		SDKUnhook(entity, SDKHook_StartTouchPost, StartTouchPost);
 		SDKUnhook(entity, SDKHook_EndTouchPost, EndTouchPost);
@@ -1882,7 +1941,7 @@ public void OnClientConnected(int client)
 	Reset(client);
 
 	gF_Modifier[client] = 16.0;
-	gI_AdjustAxis[client] = 0;
+	gI_AdjustAxis[client] = 2;
 	gI_GridSnap[client] = 16;
 	gB_SnapToWall[client] = false;
 	gB_CursorTracing[client] = true;
@@ -2927,7 +2986,7 @@ public int MenuHandler_HookZone_Editor(Menu menu, MenuAction action, int param1,
 			static int allowed_types[] = {
 				// ZoneForm_Box (unused)
 				0
-				// ZoneForm_trigger_multiple
+				// ZoneForm_trigger_multiple - 支持所有类型
 				, (1 << Zone_Start)
 				| (1 << Zone_End)
 				| (1 << Zone_Respawn)
@@ -2945,21 +3004,42 @@ public int MenuHandler_HookZone_Editor(Menu menu, MenuAction action, int param1,
 				| (1 << Zone_Speedmod)
 				| (1 << Zone_NoJump)
 				| (1 << Zone_Autobhop)
-				// ZoneForm_trigger_teleport
-				, (1 << Zone_End)
+				// ZoneForm_trigger_teleport - 支持所有类型
+				, (1 << Zone_Start)
+				| (1 << Zone_End)
 				| (1 << Zone_Respawn)
 				| (1 << Zone_Stop)
 				| (1 << Zone_Slay)
 				| (1 << Zone_Freestyle)
 				| (1 << Zone_CustomSpeedLimit)
+				| (1 << Zone_Teleport)
+				| (1 << Zone_Easybhop)
+				| (1 << Zone_Slide)
+				| (1 << Zone_Airaccelerate)
 				| (1 << Zone_Stage)
 				| (1 << Zone_NoTimerGravity)
-				// ZoneForm_func_button
+				| (1 << Zone_Gravity)
+				| (1 << Zone_Speedmod)
+				| (1 << Zone_NoJump)
+				| (1 << Zone_Autobhop)
+				// ZoneForm_func_button - 支持所有类型
 				, (1 << Zone_Start)
 				| (1 << Zone_End)
+				| (1 << Zone_Respawn)
 				| (1 << Zone_Stop)
 				| (1 << Zone_Slay)
+				| (1 << Zone_Freestyle)
+				| (1 << Zone_CustomSpeedLimit)
+				| (1 << Zone_Teleport)
+				| (1 << Zone_Easybhop)
+				| (1 << Zone_Slide)
+				| (1 << Zone_Airaccelerate)
 				| (1 << Zone_Stage)
+				| (1 << Zone_NoTimerGravity)
+				| (1 << Zone_Gravity)
+				| (1 << Zone_Speedmod)
+				| (1 << Zone_NoJump)
+				| (1 << Zone_Autobhop)
 			};
 
 			int form = gA_EditCache[param1].iForm;
@@ -3068,7 +3148,7 @@ void HookZone_SetupEditor(int client, int ent)
 	AddVectors(origin, gA_EditCache[client].fCorner1, gA_EditCache[client].fCorner1);
 	AddVectors(origin, gA_EditCache[client].fCorner2, gA_EditCache[client].fCorner2);
 
-	gI_MapStep[client] = 3;
+	gI_MapStep[client] = 4;
 	gA_EditCache[client].iEntity = ent;
 	gA_EditCache[client].iType = -1;
 	gA_EditCache[client].iTrack = -1;
@@ -3115,7 +3195,7 @@ enum struct ent_list_thing
 	int ent;
 }
 
-void OpenHookMenu_List(int client, int form, int pos = 0)
+void OpenHookMenu_List(int client, int form, int pos = 0, const char[] override_classname = "")
 {
 	Reset(client);
 	gA_EditCache[client].iForm = form;
@@ -3124,9 +3204,17 @@ void OpenHookMenu_List(int client, int form, int pos = 0)
 	float player_origin[3];
 	GetClientAbsOrigin(client, player_origin);
 
-	char classname[32]; classname =
-		 (form == ZoneForm_trigger_multiple) ? "trigger_multiple" :
-		((form == ZoneForm_trigger_teleport) ? "trigger_teleport" : "func_button");
+	char classname[32];
+	if (override_classname[0] != '\0')
+	{
+		strcopy(classname, sizeof(classname), override_classname);
+	}
+	else
+	{
+		classname =
+			 (form == ZoneForm_trigger_multiple) ? "trigger_multiple" :
+			((form == ZoneForm_trigger_teleport) ? "trigger_teleport" : "func_button");
+	}
 
 	char targetname[64], info[20], display[128];
 	int ent = -1;
@@ -3208,12 +3296,185 @@ void OpenHookMenu_List(int client, int form, int pos = 0)
 }
 
 
+// ============= Trigger列表式HookZone =============
+
+void OpenTriggerListByClass(int client, const char[] filterClass)
+{
+	if(gA_AllTriggers == null || gA_AllTriggers.Length == 0)
+	{
+		Shavit_PrintToChat(client, "地图上没有找到任何实体");
+		OpenHookMenu_Form(client);
+		return;
+	}
+
+	Menu menu = new Menu(MenuHandler_TriggerList);
+	menu.SetTitle("%s 列表\n ", filterClass);
+
+	int count = 0;
+	for(int i = 0; i < gA_AllTriggers.Length; i++)
+	{
+		int ent = gA_AllTriggers.Get(i);
+		if(!IsValidEntity(ent))
+			continue;
+
+		char classname[32];
+		GetEntityClassname(ent, classname, sizeof(classname));
+		if(!StrEqual(classname, filterClass))
+			continue;
+
+		char targetname[128];
+		GetEntPropString(ent, Prop_Data, "m_iName", targetname, sizeof(targetname));
+
+		float origin[3];
+		GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
+
+		char sInfo[16], sDisplay[128];
+		IntToString(i, sInfo, sizeof(sInfo));
+		FormatEx(sDisplay, sizeof(sDisplay), "%s (%.0f %.0f %.0f)", targetname, origin[0], origin[1], origin[2]);
+		menu.AddItem(sInfo, sDisplay);
+		count++;
+	}
+
+	if(count == 0)
+	{
+		Shavit_PrintToChat(client, "没有找到 %s 类型的实体", filterClass);
+		delete menu;
+		OpenHookMenu_Form(client);
+		return;
+	}
+
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_TriggerList(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Select)
+	{
+		char sInfo[16];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+		int idx = StringToInt(sInfo);
+
+		if(idx < 0 || idx >= gA_AllTriggers.Length)
+		{
+			OpenHookMenu_Form(param1);
+			return 0;
+		}
+
+		int ent = gA_AllTriggers.Get(idx);
+		if(!IsValidEntity(ent))
+		{
+			Shavit_PrintToChat(param1, "实体已不存在");
+			OpenHookMenu_Form(param1);
+			return 0;
+		}
+
+		gI_SelectedTrigger[param1] = ent;
+		OpenTriggerActionMenu(param1);
+	}
+	else if(action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
+	{
+		OpenHookMenu_Form(param1);
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+void OpenTriggerActionMenu(int client)
+{
+	int ent = gI_SelectedTrigger[client];
+	if(!IsValidEntity(ent))
+	{
+		OpenHookMenu_Form(client);
+		return;
+	}
+
+	char classname[32], targetname[128];
+	GetEntityClassname(ent, classname, sizeof(classname));
+	GetEntPropString(ent, Prop_Data, "m_iName", targetname, sizeof(targetname));
+
+	float origin[3];
+	GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
+
+	Menu menu = new Menu(MenuHandler_TriggerAction);
+	menu.SetTitle("%s\ntargetname: %s\norigin: %.0f %.0f %.0f\n ", classname, targetname, origin[0], origin[1], origin[2]);
+
+	menu.AddItem("tp", "传送到此实体");
+	menu.AddItem("hook", "Hook此实体为Zone");
+
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_TriggerAction(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Select)
+	{
+		int ent = gI_SelectedTrigger[param1];
+		if(!IsValidEntity(ent))
+		{
+			OpenHookMenu_Form(param1);
+			return 0;
+		}
+
+		char sInfo[16];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+
+		if(StrEqual(sInfo, "tp"))
+		{
+			float origin[3];
+			GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
+			float fMins[3], fMaxs[3];
+			GetEntPropVector(ent, Prop_Send, "m_vecMins", fMins);
+			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", fMaxs);
+			// 传送到实体中心
+			float center[3];
+			center[0] = origin[0] + (fMins[0] + fMaxs[0]) * 0.5;
+			center[1] = origin[1] + (fMins[1] + fMaxs[1]) * 0.5;
+			center[2] = origin[2] + fMins[2] + 1.0;
+			TeleportEntity(param1, center, NULL_VECTOR, view_as<float>({0.0, 0.0, 0.0}));
+			Shavit_PrintToChat(param1, "已传送到实体");
+			OpenTriggerActionMenu(param1);
+		}
+		else if(StrEqual(sInfo, "hook"))
+		{
+			char sClassname[32];
+			GetEntityClassname(ent, sClassname, sizeof(sClassname));
+
+			int form = ZoneForm_trigger_multiple;
+			if (StrEqual(sClassname, "func_button") || StrEqual(sClassname, "func_rot_button"))
+				form = ZoneForm_func_button;
+			else if (StrEqual(sClassname, "trigger_teleport"))
+				form = ZoneForm_trigger_teleport;
+
+			Reset(param1);
+			gA_EditCache[param1].iForm = form;
+			gA_EditCache[param1].sSource = "sql";
+			HookZone_SetupEditor(param1, ent);
+		}
+	}
+	else if(action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
+	{
+		OpenHookMenu_Form(param1);
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+// ============= End Trigger列表式HookZone =============
+
 bool TeleportFilter(int entity)
 {
-	char classname[20];
+	char classname[32];
 	GetEntityClassname(entity, classname, sizeof(classname));
 
-	if (StrEqual(classname, "trigger_teleport") || StrEqual(classname, "trigger_multiple") || StrEqual(classname, "func_button") || StrEqual(classname, "func_rot_button"))
+	if (StrContains(classname, "trigger_") == 0 || StrContains(classname, "func_") == 0)
 	{
 		//TR_ClipCurrentRayToEntity(MASK_ALL, entity);
 		gI_CurrentTraceEntity = entity;
@@ -3227,72 +3488,96 @@ public int MenuHandle_HookZone_Form(Menu menu, MenuAction action, int param1, in
 {
 	if (action == MenuAction_Select)
 	{
-		char info[20];
+		char info[64];
 		menu.GetItem(param2, info, sizeof(info));
-		int form = StringToInt(info);
 
-		if (form != -1)
+		if (StrEqual(info, "-1"))
 		{
-			OpenHookMenu_List(param1, form, 0);
-			return 0;
-		}
+			// 准星下的实体
+			int form = ZoneForm_trigger_multiple;
 
-		// entity under crosshair
+		float eyePos[3], eyeAng[3], eyeDir[3];
+		GetClientEyePosition(param1, eyePos);
+		GetClientEyeAngles(param1, eyeAng);
+		GetAngleVectors(eyeAng, eyeDir, NULL_VECTOR, NULL_VECTOR);
 
-		float origin[3], endpos[3];
-		GetClientEyePosition(param1, origin);
-		GetClientEyeAngles(param1, endpos);
-		GetAngleVectors(endpos, endpos, NULL_VECTOR, NULL_VECTOR);
-		ScaleVector(endpos, 30000.0);
-		AddVectors(origin, endpos, endpos);
+		float farend[3];
+		farend = eyeDir;
+		ScaleVector(farend, 30000.0);
+		AddVectors(eyePos, farend, farend);
 
-		gI_CurrentTraceEntity = 0; // had some troubles in mpbhops_but_working with TR_EnumerateEntitiesHull. So I did this. And copied it to bhoptimer
-		TR_EnumerateEntitiesHull(origin, endpos,
-			view_as<float>({-8.0, -8.0, 0.0}), view_as<float>({8.0, 8.0, 0.0}),
-			PARTITION_TRIGGER_EDICTS, TeleportFilter, 0);
-		int ent = gI_CurrentTraceEntity;
-
-		if (ent <= MaxClients || ent >= 2048)
+		// 世界碰撞检测，限制搜索范围到碰撞点+128
+		float searchEnd[3];
+		TR_TraceRayFilter(eyePos, farend, MASK_SOLID, RayType_EndPoint, TRFilter_NoPlayers, param1);
+		if(TR_DidHit())
 		{
-			Shavit_PrintToChat(param1, "Couldn't find entity under crosshair");
-			OpenHookMenu_Form(param1);
-			return 0;
-		}
-
-		char classname[32];
-		GetEntityClassname(ent, classname, sizeof(classname));
-
-		if (StrEqual(classname, "func_button") || StrEqual(classname, "func_rot_button"))
-		{
-			form = ZoneForm_func_button;
-		}
-		else if (StrEqual(classname, "trigger_multiple"))
-		{
-			form = ZoneForm_trigger_multiple;
-		}
-		else if (StrEqual(classname, "trigger_teleport"))
-		{
-			form = ZoneForm_trigger_teleport;
+			float worldHitPos[3];
+			TR_GetEndPosition(worldHitPos);
+			float extend[3];
+			extend = eyeDir;
+			ScaleVector(extend, 128.0);
+			AddVectors(worldHitPos, extend, searchEnd);
 		}
 		else
 		{
-			Shavit_PrintToChat(param1, "Entity class %s (%d) not supported", classname, ent);
-			OpenHookMenu_Form(param1);
-			return 0;
+			searchEnd = farend;
 		}
 
-		if (gI_EntityZone[ent] > -1)
+		gI_CurrentTraceEntity = 0;
+		TR_EnumerateEntitiesHull(eyePos, searchEnd,
+			view_as<float>({-8.0, -8.0, 0.0}), view_as<float>({8.0, 8.0, 0.0}),
+			PARTITION_NON_STATIC_EDICTS, TeleportFilter, 0);
+		int ent = gI_CurrentTraceEntity;
+
+		// 找到了trigger/button实体 → 走原来的hook流程
+		if (ent > MaxClients && ent < 2048)
 		{
-			Shavit_PrintToChat(param1, "Entity %s (%d) is already hooked", classname, ent);
-			OpenHookMenu_Form(param1);
+			char classname[32];
+			GetEntityClassname(ent, classname, sizeof(classname));
+
+			if (StrEqual(classname, "func_button") || StrEqual(classname, "func_rot_button"))
+			{
+				form = ZoneForm_func_button;
+			}
+			else if (StrEqual(classname, "trigger_teleport"))
+			{
+				form = ZoneForm_trigger_teleport;
+			}
+			else if (StrContains(classname, "trigger_") == 0 || StrContains(classname, "func_") == 0)
+			{
+				form = ZoneForm_trigger_multiple;
+			}
+			else
+			{
+				Shavit_PrintToChat(param1, "Entity class %s (%d) not supported", classname, ent);
+				OpenHookMenu_Form(param1);
+				return 0;
+			}
+
+			if (gI_EntityZone[ent] > -1)
+			{
+				Shavit_PrintToChat(param1, "Entity %s (%d) is already hooked", classname, ent);
+				OpenHookMenu_Form(param1);
+				return 0;
+			}
+
+			Reset(param1);
+			gI_HookListPos[param1] = 0;
+			gA_EditCache[param1].iForm = form;
+			gA_EditCache[param1].sSource = "sql";
+			HookZone_SetupEditor(param1, ent);
 			return 0;
 		}
 
-		Reset(param1);
-		gI_HookListPos[param1] = 0;
-		gA_EditCache[param1].iForm = form;
-		gA_EditCache[param1].sSource = "sql";
-		HookZone_SetupEditor(param1, ent);
+		// 没找到trigger
+		Shavit_PrintToChat(param1, "准星下没有找到实体，请尝试使用列表模式");
+		OpenHookMenu_Form(param1);
+		}
+		else
+		{
+			// info是classname，列出该类型的所有实体
+			OpenTriggerListByClass(param1, info);
+		}
 	}
 	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
 	{
@@ -3308,6 +3593,7 @@ public int MenuHandle_HookZone_Form(Menu menu, MenuAction action, int param1, in
 
 void OpenHookMenu_Form(int client)
 {
+	ScanAllTriggers();
 	Reset(client);
 
 	Menu menu = new Menu(MenuHandle_HookZone_Form);
@@ -3317,10 +3603,37 @@ void OpenHookMenu_Form(int client)
 
 	FormatEx(display, sizeof(display), "%T\n ", "ZoneHook_Crosshair", client);
 	menu.AddItem("-1", display);
-	// hardcoded ZoneForm_ values
-	menu.AddItem("3", "func_button");
-	menu.AddItem("1", "trigger_multiple");
-	menu.AddItem("2", "trigger_teleport");
+
+	// 按类型统计数量并显示
+	static const char scan_classes[][] = {
+		"func_button",
+		"trigger_multiple",
+		"trigger_teleport",
+		"trigger_push",
+		"trigger_hurt",
+		"func_door",
+		"func_brush",
+		"func_wall"
+	};
+
+	for(int c = 0; c < sizeof(scan_classes); c++)
+	{
+		int count = 0;
+		if(gA_AllTriggers != null)
+		{
+			for(int i = 0; i < gA_AllTriggers.Length; i++)
+			{
+				int ent = gA_AllTriggers.Get(i);
+				if(!IsValidEntity(ent)) continue;
+				char cls[32];
+				GetEntityClassname(ent, cls, sizeof(cls));
+				if(StrEqual(cls, scan_classes[c])) count++;
+			}
+		}
+
+		FormatEx(display, sizeof(display), "%s [%d]", scan_classes[c], count);
+		menu.AddItem(scan_classes[c], display, count > 0 ? ITEMDRAW_DEFAULT : ITEMDRAW_DISABLED);
+	}
 
 	menu.ExitBackButton = true;
 	menu.Display(client, MENU_TIME_FOREVER);
@@ -3414,7 +3727,7 @@ public int MenuHandler_ZoneEdit(Menu menu, MenuAction action, int param1, int pa
 			default:
 			{
 				// a hack to place the player in the last step of zone editing
-				gI_MapStep[param1] = 3;
+				gI_MapStep[param1] = 4;
 				gA_EditCache[param1] = gA_ZoneCache[id];
 				gI_ZoneID[param1] = id;
 				gI_LastMenuPos[param1] = GetMenuSelectionPosition();
@@ -3956,6 +4269,7 @@ void Reset(int client)
 	gI_ZoneID[client] = -1;
 
 	gV_WallSnap[client] = ZERO_VECTOR;
+	gF_HeightBaseZ[client] = 0.0;
 }
 
 void ShowPanel(int client, int step)
@@ -4008,6 +4322,42 @@ void ShowPanel(int client, int step)
 	pPanel.Send(client, ZoneCreation_Handler, MENU_TIME_FOREVER);
 
 	delete pPanel;
+}
+
+void ShowHeightPanel(int client)
+{
+	gI_MapStep[client] = 3;
+
+	Panel pPanel = new Panel();
+
+	char sPanelText[128];
+	float currentHeight = gA_EditCache[client].fCorner2[2] - gF_HeightBaseZ[client];
+	FormatEx(sPanelText, sizeof(sPanelText), "上下看调整区域高度 [%.0f units]\n按E确认", currentHeight);
+	pPanel.DrawItem(sPanelText, ITEMDRAW_RAWLINE);
+
+	char sPanelItem[64];
+	FormatEx(sPanelItem, sizeof(sPanelItem), "%T", "AbortZoneCreation", client);
+	pPanel.DrawItem(sPanelItem);
+
+	pPanel.Send(client, HeightAdjust_Handler, MENU_TIME_FOREVER);
+	delete pPanel;
+}
+
+public int HeightAdjust_Handler(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Select)
+	{
+		if(param2 == 1)
+		{
+			Reset(param1);
+		}
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+
+	return 0;
 }
 
 public int ZoneCreation_Handler(Menu menu, MenuAction action, int param1, int param2)
@@ -4254,7 +4604,7 @@ bool InStartOrEndZone(float point1[3], float point2[3], int track, int type)
 
 public Action Shavit_OnUserCmdPre(int client, int &buttons, int &impulse, float vel[3], float angles[3], TimerStatus status, int track, int style)
 {
-	if(gI_MapStep[client] > 0 && gI_MapStep[client] != 3)
+	if(gI_MapStep[client] > 0 && gI_MapStep[client] != 4)
 	{
 		int button = (gEV_Type == Engine_TF2)? IN_ATTACK2:IN_USE;
 
@@ -4262,46 +4612,54 @@ public Action Shavit_OnUserCmdPre(int client, int &buttons, int &impulse, float 
 		{
 			if(!gB_Button[client])
 			{
-				float vPlayerOrigin[3];
-				GetClientAbsOrigin(client, vPlayerOrigin);
-
-				float origin[3];
-
-				if(gB_CursorTracing[client])
+				if(gI_MapStep[client] == 3)
 				{
-					origin = GetAimPosition(client);
-				}
-				else if(!(gB_SnapToWall[client] && SnapToWall(vPlayerOrigin, client, origin)))
-				{
-					origin = SnapToGrid(vPlayerOrigin, gI_GridSnap[client], false);
+					// Step 3: confirm height adjustment
+					gI_MapStep[client] = 4;
+					CreateEditMenu(client, true);
 				}
 				else
 				{
-					gV_WallSnap[client] = origin;
-				}
+					float vPlayerOrigin[3];
+					GetClientAbsOrigin(client, vPlayerOrigin);
 
-				origin[2] = vPlayerOrigin[2];
+					float origin[3];
 
-				if(gI_MapStep[client] == 1)
-				{
-					origin[2] += 1.0;
-
-					if (!InStartOrEndZone(origin, NULL_VECTOR, gA_EditCache[client].iTrack, gA_EditCache[client].iType))
+					if(gB_CursorTracing[client])
 					{
-						gA_EditCache[client].fCorner1 = origin;
-						ShowPanel(client, 2);
+						origin = GetAimPosition(client);
 					}
-				}
-				else if(gI_MapStep[client] == 2)
-				{
-					origin[2] += gCV_Height.FloatValue;
-
-					if (origin[0] != gA_EditCache[client].fCorner1[0] && origin[1] != gA_EditCache[client].fCorner1[1] && !InStartOrEndZone(gA_EditCache[client].fCorner1, origin, gA_EditCache[client].iTrack, gA_EditCache[client].iType))
+					else if(!(gB_SnapToWall[client] && SnapToWall(vPlayerOrigin, client, origin)))
 					{
-						gA_EditCache[client].fCorner2 = origin;
-						gI_MapStep[client]++;
+						origin = SnapToGrid(vPlayerOrigin, gI_GridSnap[client], false);
+					}
+					else
+					{
+						gV_WallSnap[client] = origin;
+					}
 
-						CreateEditMenu(client, true);
+					origin[2] = vPlayerOrigin[2];
+
+					if(gI_MapStep[client] == 1)
+					{
+						origin[2] += 1.0;
+
+						if (!InStartOrEndZone(origin, NULL_VECTOR, gA_EditCache[client].iTrack, gA_EditCache[client].iType))
+						{
+							gA_EditCache[client].fCorner1 = origin;
+							ShowPanel(client, 2);
+						}
+					}
+					else if(gI_MapStep[client] == 2)
+					{
+						origin[2] += 1.0;
+
+						if (origin[0] != gA_EditCache[client].fCorner1[0] && origin[1] != gA_EditCache[client].fCorner1[1] && !InStartOrEndZone(gA_EditCache[client].fCorner1, origin, gA_EditCache[client].iTrack, gA_EditCache[client].iType))
+						{
+							gA_EditCache[client].fCorner2 = origin;
+							gF_HeightBaseZ[client] = origin[2];
+							ShowHeightPanel(client);
+						}
 					}
 				}
 			}
@@ -4411,7 +4769,7 @@ public int CreateZoneConfirm_Handler(Menu menu, MenuAction action, int param1, i
 
 public Action OnClientSayCommand(int client, const char[] command, const char[] sArgs)
 {
-	if(gB_WaitingForChatInput[client] && gI_MapStep[client] == 3)
+	if(gB_WaitingForChatInput[client] && gI_MapStep[client] == 4)
 	{
 		if (gA_EditCache[client].iType == Zone_Gravity || gA_EditCache[client].iType == Zone_Speedmod)
 		{
@@ -4932,7 +5290,27 @@ public Action Timer_Draw(Handle Timer, any data)
 		gV_WallSnap[client] = origin;
 	}
 
-	if (gI_MapStep[client] == 1 || gA_EditCache[client].fCorner2[0] == 0.0)
+	if (gI_MapStep[client] == 3)
+	{
+		// Step 3: dynamically adjust height based on mouse pitch
+		float eyeAngles[3];
+		GetClientEyeAngles(client, eyeAngles);
+		float pitch = eyeAngles[0]; // -89 (up) to 89 (down)
+		float maxHeight = gCV_Height.FloatValue * 4.0;
+		float heightOffset = (-pitch / 89.0) * maxHeight;
+
+		if(heightOffset < 16.0)
+		{
+			heightOffset = 16.0;
+		}
+
+		gA_EditCache[client].fCorner2[2] = gF_HeightBaseZ[client] + heightOffset;
+		origin = gA_EditCache[client].fCorner2;
+
+		// Refresh panel to show updated height value
+		ShowHeightPanel(client);
+	}
+	else if (gI_MapStep[client] == 1 || gA_EditCache[client].fCorner2[0] == 0.0)
 	{
 		origin[2] = (vPlayerOrigin[2] + gCV_Height.FloatValue);
 	}
@@ -4956,7 +5334,7 @@ public Action Timer_Draw(Handle Timer, any data)
 
 		int colors[4];
 		GetZoneColors(colors, type, track, 125);
-		DrawZone(points, colors, 0.1, gA_ZoneSettings[type][track].fWidth, false, origin, gI_BeamSpriteIgnoreZ, gA_ZoneSettings[type][track].iHalo, track, type, gA_ZoneSettings[type][track].iSpeed, false, 0, gI_AdjustAxis[client]);
+		DrawZone(points, colors, 0.1, gA_ZoneSettings[type][track].fWidth, (gI_MapStep[client] < 3), origin, gI_BeamSpriteIgnoreZ, gA_ZoneSettings[type][track].iHalo, track, type, gA_ZoneSettings[type][track].iSpeed, false, 0, gI_AdjustAxis[client]);
 
 		if (gA_EditCache[client].iType == Zone_Teleport && !EmptyVector(gA_EditCache[client].fDestination))
 		{
@@ -4965,7 +5343,7 @@ public Action Timer_Draw(Handle Timer, any data)
 		}
 	}
 
-	if(gI_MapStep[client] != 3 && !EmptyVector(origin))
+	if(gI_MapStep[client] != 4 && gI_MapStep[client] != 3 && !EmptyVector(origin))
 	{
 		origin[2] -= gCV_Height.FloatValue;
 
@@ -5064,13 +5442,14 @@ void DrawZone(float points[8][3], int color[4], float life, float width, bool fl
 		// The beam pairs array at the top of this function isn't useful for the order we want
 		// for drawing the editaxis beams so that gist was used to help figure out which
 		// beam indices go where, and then to make a fun little magic string out of it...
-		char magic[] = "\x01\x132\x02EWvF\x04\x15&77&2v\x15\x04\x10T\x13W\x02F7\x151u&\x04 d#g\x01E";
+		char magic[] = "\x01\x132\x02EWvF\x04\x15&77&2v\x15\x04\x10T\x13W\x02F&\x04 d7\x151u#g\x01E";
 
-		for (int j = 0; j < 12; j++)
+		int edgeCount = flat ? 4 : 12;
+		for (int j = 0; j < edgeCount; j++)
 		{
-			float actual_width = (j >= 8) ? 0.5 : 1.0;
+			float actual_width = (j >= 8) ? 1.0 : 3.0;
 			char x = magic[editaxis*12+j];
-			TE_SetupBeamPoints(points[x >> 4], points[x & 7], beam, halo, 0, 0, life, actual_width, actual_width, 0, 0.0, clrs[((j >= 8) ? ZoneColor_White : ZoneColor_Green) - 1], speed);
+			TE_SetupBeamPoints(points[x >> 4], points[x & 7], beam, halo, 0, 0, life, actual_width, actual_width, 0, 0.0, clrs[((j >= 8) ? ZoneColor_White : ZoneColor_Red) - 1], speed);
 			TE_Send(clients, count, 0.0);
 		}
 
@@ -5079,8 +5458,7 @@ void DrawZone(float points[8][3], int color[4], float life, float width, bool fl
 
 	for (int i = 0; i < count; i++)
 	{
-		int point_size = (gI_ZoneDisplayType[clients[i]][type][track] == ZoneDisplay_Flat ||
-		                  gI_ZoneDisplayType[clients[i]][type][track] == ZoneDisplay_Default && flat) ? 4 : 12;
+		int point_size = (flat || gI_ZoneDisplayType[clients[i]][type][track] == ZoneDisplay_Flat) ? 4 : 12;
 
 		int actual_color[4];
 		actual_color = (gI_ZoneColor[clients[i]][type][track] == ZoneColor_Default) ? color : clrs[gI_ZoneColor[clients[i]][type][track] - 1];

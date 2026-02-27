@@ -11,6 +11,7 @@
  * - 修改时：监听 !settier 命令，自动生成/更新本地 JSON 文件。
  * 6. 迁移逻辑：使用 RequestFrame 分批异步处理 i 文件夹中的文件，防止超时崩溃。
  * 7. sm_json 命令修复：切换回 SQL 模式时使用 Native 调用，解决不生效的问题。
+ * 8. 2026/02/24 修复 CacheToJsonObject 类型转换导致的栈溢出
  */
 
 #include <sourcemod>
@@ -53,7 +54,7 @@ public Plugin myinfo =
 	name = "[shavit] Map Zones (JSON)",
 	author = "rtldg",
 	description = "Zone: 数据库优先; Tier: JSON 优先且自动保存; 提供异步迁移工具; 手动源选择(预览/覆盖)。",
-	version = "1.0.14-ReloadFix",
+	version = "1.0.16-StackFix",
 	url = "https://github.com/shavitush/bhoptimer"
 }
 
@@ -73,12 +74,10 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	BuildPath(Path_SM, dir, sizeof(dir), "data/zones-%s", gS_EngineName);
 	if (!DirExists(dir)) CreateDirectory(dir, 511);
 	
-	// 确保 z (zones) 文件夹存在
 	StrCat(dir, sizeof(dir), "/z");
 	if (!DirExists(dir)) CreateDirectory(dir, 511);
 	
-	// 确保 i (info/tier) 文件夹存在
-	dir[strlen(dir)-1] = 'i'; // 把 /z 变成 /i
+	dir[strlen(dir)-1] = 'i';
 	if (!DirExists(dir)) CreateDirectory(dir, 511);
 
 	RegPluginLibrary("shavit-zones-json");
@@ -97,13 +96,10 @@ public void OnPluginStart()
 	RegAdminCmd("sm_dumpzones", Command_DumpZones, ADMFLAG_RCON, "将当前地图的 Zone 转存为 JSON 文件");
 	RegAdminCmd("sm_savezones", Command_DumpZones, ADMFLAG_RCON, "将当前地图的 Zone 转存为 JSON 文件");
 
-	// 新增迁移命令 (异步版)
 	RegAdminCmd("sm_json_migrate_tiers", Command_MigrateTiers, ADMFLAG_ROOT, "将 i 文件夹中的所有 JSON Tier 数据批量迁移到数据库");
 
-	// 新增源选择命令
 	RegAdminCmd("sm_json", Command_SelectSource, ADMFLAG_RCON, "打开菜单选择加载 Zone 的来源 (强制 JSON 或 标准 SQL)");
 
-	// 监听 Tier 设置命令，以便自动更新 JSON
 	AddCommandListener(OnSetTierCommand, "sm_settier");
 	AddCommandListener(OnSetTierCommand, "sm_setmaptier");
 	
@@ -129,15 +125,12 @@ public void Shavit_LoadZonesHere()
 	if (!gCV_Enable.BoolValue || gH_SQL == null)
 		return;
 
-	// 1. 检查并加载 Zones (保持原逻辑：优先数据库)
 	CheckDatabaseForZones();
-	
-	// 2. 加载 Tier (MapInfo) (保持原逻辑：优先本地 JSON)
 	LoadTierFromJSON();
 }
 
 // =============================================================================
-// 手动选择源 (sm_json) - 包含二级菜单
+// 手动选择源 (sm_json)
 // =============================================================================
 
 public Action Command_SelectSource(int client, int args)
@@ -169,7 +162,6 @@ public int MenuHandler_SelectSource(Menu menu, MenuAction action, int param1, in
 
 		if (StrEqual(info, "json"))
 		{
-			// 弹出二级菜单：询问操作类型
 			Menu subMenu = new Menu(MenuHandler_ConfirmJSONAction);
 			subMenu.SetTitle("JSON 加载选项\n警告: 覆盖数据库将清空当前地图原有 Zone！");
 			
@@ -181,10 +173,8 @@ public int MenuHandler_SelectSource(Menu menu, MenuAction action, int param1, in
 		}
 		else if (StrEqual(info, "sql"))
 		{
-			// SQL 模式：调用 Shavit Native 进行重载
-			// 这种方式比 ServerCommand 更可靠，能确保内存被清理并重新触发加载流程
-			Shavit_UnloadZones(); // 先显式清空内存中的 Zone，以防万一
-			Shavit_ReloadZones(); // 触发标准加载流程 (shavit-zones 会执行 LoadZonesHere -> RefreshZones)
+			Shavit_UnloadZones();
+			Shavit_ReloadZones();
 			
 			Shavit_PrintToChat(param1, "已触发标准 SQL 重载 (正在查询数据库...)。");
 		}
@@ -206,7 +196,6 @@ public int MenuHandler_ConfirmJSONAction(Menu menu, MenuAction action, int param
 
 		if (StrEqual(info, "preview"))
 		{
-			// 临时预览：unload -> load json (save=false)
 			Shavit_UnloadZones();
 			LoadTierFromJSON();
 			LoadZonesFromJSON(false);
@@ -214,7 +203,6 @@ public int MenuHandler_ConfirmJSONAction(Menu menu, MenuAction action, int param
 		}
 		else if (StrEqual(info, "overwrite"))
 		{
-			// 覆盖数据库：unload -> load json (save=true)
 			Shavit_UnloadZones();
 			LoadTierFromJSON();
 			LoadZonesFromJSON(true);
@@ -223,7 +211,6 @@ public int MenuHandler_ConfirmJSONAction(Menu menu, MenuAction action, int param
 	}
 	else if (action == MenuAction_Cancel && param2 == MenuCancel_ExitBack)
 	{
-		// 返回上一级
 		Command_SelectSource(param1, 0);
 	}
 	else if (action == MenuAction_End)
@@ -258,7 +245,6 @@ public void SQL_CheckZones_Callback(Database db, DBResultSet results, const char
 	}
 	else
 	{
-		// 自动加载时，仅加载到内存（不保存到 DB，防止意外覆盖）
 		LoadZonesFromJSON(false);
 	}
 }
@@ -271,7 +257,6 @@ void LoadZonesFromJSON(bool save_to_db = false)
 	if (!FileExists(path))
 		return;
 
-	// API 修正：使用 json_read_from_file 全局函数
 	JSON_Object root = json_read_from_file(path);
 	if (root == null) return;
 	
@@ -288,7 +273,6 @@ void LoadZonesFromJSON(bool save_to_db = false)
 		char source[16];
 		gCV_Source.GetString(source, sizeof(source));
 		
-		// 如果需要保存到数据库，先清空当前地图的 Zone
 		if (save_to_db && gH_SQL != null)
 		{
 			char sQuery[512];
@@ -368,16 +352,14 @@ int ProcessJsonZones(JSON_Array records, const char source[16], bool save_to_db)
 		
 		strcopy(cache.sSource, sizeof(cache.sSource), source);
 		
-		// 加载到内存
 		Shavit_AddZone(cache);
 		count++;
 		
-		// 准备 SQL 插入语句
 		if (save_to_db && trans != null)
 		{
 			char sQuery[2048];
 			char sEscapedMap[PLATFORM_MAX_PATH * 2 + 1];
-			char sEscapedTarget[128]; // target 64 * 2
+			char sEscapedTarget[128];
 			gH_SQL.Escape(gS_Map, sEscapedMap, sizeof(sEscapedMap));
 			gH_SQL.Escape(cache.sTarget, sEscapedTarget, sizeof(sEscapedTarget));
 
@@ -410,7 +392,6 @@ int ProcessJsonZones(JSON_Array records, const char source[16], bool save_to_db)
 
 public void SQL_ImportZones_Success(Database db, any data, int numQueries, DBResultSet[] results, any[] queryData)
 {
-	// 成功导入
 }
 
 public void SQL_ImportZones_Failure(Database db, any data, int numQueries, const char[] error, int failIndex, any[] queryData)
@@ -436,7 +417,6 @@ void GetVecFromJson(JSON_Object json, const char[] key, float vec[3])
 void LoadTierFromJSON()
 {
 	char path[PLATFORM_MAX_PATH];
-	// 路径: data/zones-csgo/i/mapname.json
 	BuildPath(Path_SM, path, sizeof(path), "data/zones-%s/i/%s.json", gS_EngineName, gS_Map);
 
 	if (!FileExists(path))
@@ -464,7 +444,6 @@ void LoadTierFromJSON()
 				
 				if (tier > 0)
 				{
-					// 使用 ServerCommand 更新，覆盖数据库设置
 					ServerCommand("sm_settier %d", tier);
 					PrintToServer("[shavit-zones-json] 从 JSON 设置了 %s 的 Tier 为 %d。", gS_Map, tier);
 				}
@@ -476,15 +455,13 @@ void LoadTierFromJSON()
 }
 
 // =============================================================================
-// Tier 自动保存逻辑 (Command Listener)
+// Tier 自动保存逻辑
 // =============================================================================
 
 public Action OnSetTierCommand(int client, const char[] command, int args)
 {
-	// 防止死循环：如果是 Server (client 0) 发出的命令（例如来自 LoadTierFromJSON），则忽略
 	if (client == 0) return Plugin_Continue;
 
-	// 检查权限
 	if (!CheckCommandAccess(client, "sm_settier", ADMFLAG_RCON)) return Plugin_Continue;
 
 	if (args < 1) return Plugin_Continue;
@@ -507,7 +484,6 @@ public Action OnSetTierCommand(int client, const char[] command, int args)
 		strcopy(sMap, sizeof(sMap), gS_Map);
 	}
 
-	// 保存到 JSON
 	SaveTierToJSON(sMap, tier);
 
 	return Plugin_Continue;
@@ -521,7 +497,6 @@ void SaveTierToJSON(const char[] map, int tier)
 	JSON_Array root = null;
 	JSON_Object mainTrack = null;
 
-	// 尝试读取现有文件，保留其他数据
 	if (FileExists(path))
 	{
 		JSON_Object existing = json_read_from_file(path);
@@ -543,7 +518,6 @@ void SaveTierToJSON(const char[] map, int tier)
 		root = new JSON_Array();
 	}
 
-	// 确保 Track 0 (Main) 对象存在
 	if (root.Length > 0)
 	{
 		mainTrack = root.GetObject(0);
@@ -556,21 +530,17 @@ void SaveTierToJSON(const char[] map, int tier)
 		else root.SetObject(0, mainTrack);
 	}
 
-	// 更新 Tier
 	mainTrack.SetInt("tier", tier);
 
-	// 写入文件
 	root.WriteToFile(path, JSON_ENCODE_PRETTY);
 	
-	// 清理
-	JSON_Object rootObj = view_as<JSON_Object>(root);
-	json_cleanup_and_delete(rootObj);
+	json_cleanup_and_delete(view_as<JSON_Object>(root));
 	
 	PrintToServer("[shavit-zones-json] 地图 %s 的 Tier (%d) 已更新并保存至 JSON。", map, tier);
 }
 
 // =============================================================================
-// Tier 批量迁移逻辑 (Migrate Tiers) - 异步处理防止超时
+// Tier 批量迁移逻辑
 // =============================================================================
 
 public Action Command_MigrateTiers(int client, int args)
@@ -597,17 +567,15 @@ public Action Command_MigrateTiers(int client, int args)
 		return Plugin_Handled;
 	}
 
-	// 准备数据包
 	DataPack pack = new DataPack();
-	pack.WriteCell(client == 0 ? 0 : GetClientUserId(client)); // 0: UserId
-	pack.WriteCell(dir);                                       // 1: Directory Handle
-	pack.WriteCell(new Transaction());                         // 2: Transaction Handle
-	pack.WriteCell(0);                                         // 3: Count
-	pack.WriteString(dirPath);                                 // 4: Path string
+	pack.WriteCell(client == 0 ? 0 : GetClientUserId(client));
+	pack.WriteCell(dir);
+	pack.WriteCell(new Transaction());
+	pack.WriteCell(0);
+	pack.WriteString(dirPath);
 
 	ReplyToCommand(client, "[shavit-zones-json] 开始后台处理 Tier 迁移...");
 	
-	// 开始异步循环
 	RequestFrame(ProcessMigrationBatch, pack);
 
 	return Plugin_Handled;
@@ -615,7 +583,6 @@ public Action Command_MigrateTiers(int client, int args)
 
 public void ProcessMigrationBatch(DataPack pack)
 {
-	// 1. 读取数据
 	pack.Reset();
 	int userid = pack.ReadCell();
 	DirectoryListing dir = view_as<DirectoryListing>(pack.ReadCell());
@@ -626,9 +593,8 @@ public void ProcessMigrationBatch(DataPack pack)
 
 	int client = (userid == 0) ? 0 : GetClientOfUserId(userid);
 	
-	// 2. 批量处理逻辑
 	int batchCount = 0;
-	int BATCH_SIZE = 5; // 每次只处理5个文件，防止超时
+	int BATCH_SIZE = 5;
 	char filename[PLATFORM_MAX_PATH];
 	FileType type;
 	bool finished = false;
@@ -687,7 +653,6 @@ public void ProcessMigrationBatch(DataPack pack)
 		batchCount++;
 	}
 
-	// 3. 结果判断
 	if (finished)
 	{
 		if (count > 0)
@@ -705,13 +670,11 @@ public void ProcessMigrationBatch(DataPack pack)
 	}
 	else
 	{
-		// 4. 更新状态并继续下一帧
-		pack.Position = 0; // 回到开头
+		pack.Position = 0;
 		pack.WriteCell(userid);
 		pack.WriteCell(dir);
 		pack.WriteCell(trans);
-		pack.WriteCell(count); // 更新计数
-		// 字符串在最后，无需重写
+		pack.WriteCell(count);
 		
 		RequestFrame(ProcessMigrationBatch, pack);
 	}
@@ -720,7 +683,7 @@ public void ProcessMigrationBatch(DataPack pack)
 public void SQL_MigrateTiers_Success(Database db, any data, int numQueries, DBResultSet[] results, any[] queryData)
 {
 	int client = (data == 0) ? 0 : GetClientOfUserId(data);
-	if (client == 0 && data != 0) return; // User disconnected
+	if (client == 0 && data != 0) return;
 	if (client == 0 || IsClientInGame(client))
 	{
 		ReplyToCommand(client, "[shavit-zones-json] 成功迁移了 %d 条 Tier 数据到数据库。", numQueries);
@@ -738,10 +701,10 @@ public void SQL_MigrateTiers_Failure(Database db, any data, int numQueries, cons
 }
 
 // =============================================================================
-// 转存逻辑 (Dump Zones)
+// 转存逻辑 (Dump Zones) - 已修复
 // =============================================================================
 
-void FillBoxMinMax(float point1[3], float point2[3], float boxmin[3], float boxmax[3])
+void FillBoxMinMax(const float point1[3], const float point2[3], float boxmin[3], float boxmax[3])
 {
 	for (int i = 0; i < 3; i++)
 	{
@@ -774,7 +737,8 @@ JSON_Array CreateJsonVec(float vec[3])
 
 JSON_Object CacheToJsonObject(zone_cache_t cache)
 {
-	FillBoxMinMax(cache.fCorner1, cache.fCorner2, cache.fCorner1, cache.fCorner2);
+	float boxmin[3], boxmax[3];
+	FillBoxMinMax(cache.fCorner1, cache.fCorner2, boxmin, boxmax);
 	
 	JSON_Object obj = new JSON_Object();
 	obj.SetString("type", gS_ZoneTypes[cache.iType]);
@@ -784,17 +748,20 @@ JSON_Object CacheToJsonObject(zone_cache_t cache)
 	if (cache.iFlags) obj.SetInt("flags", cache.iFlags);
 	if (cache.iData) obj.SetInt("data", cache.iData);
 	
-	if (!EmptyVector(cache.fCorner1)) {
-		JSON_Array a = CreateJsonVec(cache.fCorner1);
-		obj.SetObject("point_a", a); 
+	if (!EmptyVector(boxmin))
+	{
+		JSON_Array a = CreateJsonVec(boxmin);
+		obj.SetObject("point_a", a);   // 正确写法：直接传递数组句柄
 	}
 	
-	if (!EmptyVector(cache.fCorner2)) {
-		JSON_Array b = CreateJsonVec(cache.fCorner2);
+	if (!EmptyVector(boxmax))
+	{
+		JSON_Array b = CreateJsonVec(boxmax);
 		obj.SetObject("point_b", b);
 	}
 	
-	if (!EmptyVector(cache.fDestination)) {
+	if (!EmptyVector(cache.fDestination))
+	{
 		JSON_Array c = CreateJsonVec(cache.fDestination);
 		obj.SetObject("dest", c);
 	}
@@ -829,7 +796,8 @@ public Action Command_DumpZones(int client, int args)
 	char path[PLATFORM_MAX_PATH];
 	BuildPath(Path_SM, path, sizeof(path), "data/zones-%s/z/%s.json", gS_EngineName, gS_Map);
 	
-	if (root.WriteToFile(path, JSON_ENCODE_PRETTY))
+	// 使用非美化模式降低栈消耗（必要时可改回 JSON_ENCODE_PRETTY）
+	if (root.WriteToFile(path, 0))
 	{
 		Shavit_PrintToChat(client, "已将 %d 个 Zone 转存至: %s", count, path);
 	}
@@ -838,8 +806,7 @@ public Action Command_DumpZones(int client, int args)
 		Shavit_PrintToChat(client, "转存失败! 无法写入文件: %s", path);
 	}
 	
-	JSON_Object rootObj = view_as<JSON_Object>(root);
-	json_cleanup_and_delete(rootObj);
+	json_cleanup_and_delete(view_as<JSON_Object>(root));
 
 	return Plugin_Handled;
 }

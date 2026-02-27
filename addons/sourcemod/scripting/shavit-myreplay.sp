@@ -4,6 +4,7 @@
 #include <shavit/replay-file>
 #include <shavit/replay-playback>
 #include <shavit/replay-recorder>
+#include <srcwr/floppy>
 #include <myreplay>
 #include <clientprefs>
 
@@ -25,6 +26,7 @@ Database gH_ShavitDB;
 
 bool gB_Late;
 bool gB_Debug;
+bool gB_Floppy;
 bool gB_Connected;
 bool gB_ReplayPlayback;
 bool gB_ReplayRecorder;
@@ -116,6 +118,8 @@ public void OnAllPluginsLoaded()
     {
         SetFailState("此插件需要 shavit-replay-playback！");
     }
+
+    gB_Floppy = (GetFeatureStatus(FeatureType_Native, "SRCWRFloppy_AsyncSaveReplay") == FeatureStatus_Available);
 }
 
 public void OnLibraryAdded(const char[] name)
@@ -355,7 +359,9 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
     {
         if(!replay.GetHeader(header) || (gB_AutoSave[client] && header.fTime > time && header.iStyle == style && header.iTrack == track))
         {
-            if(CopyReplayFile(replaypath, path))
+            if (gB_Floppy)
+                AsyncCopyReplay(client, path, frames, style, track, time, preframes, postframes, 0, gB_AutoWatch[client]);
+            else if(CopyReplayFile(replaypath, path))
             {
                 SavePersonalReplay(client);
 
@@ -372,16 +378,16 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
     {
         if(!replay.GetHeader(header) || (header.fTime > time && header.iStyle == style && header.iTrack == track))
         {
-            if (!StrEqual(path, replaypath))
+            if (gB_Floppy)
+                AsyncCopyReplay(client, path, frames, style, track, time, preframes, postframes, 0, gB_AutoWatch[client]);
+            else if(CopyReplayFile(replaypath, path))
             {
-                 RenameFile(path, replaypath);
-            }
+                SavePersonalReplay(client);
 
-            SavePersonalReplay(client);
-
-            if(gB_AutoWatch[client])
-            {
-                StartPersonalReplay(client, replay.sAuth);
+                if(gB_AutoWatch[client])
+                {
+                    StartPersonalReplay(client, replay.sAuth);
+                }
             }
         }
         else
@@ -396,7 +402,12 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
 
         if (!StrEqual(tempPath, replaypath))
         {
-            RenameFile(tempPath, replaypath);
+            if (gB_Floppy)
+            {
+                AsyncCopyReplay(client, tempPath, frames, style, track, time, preframes, postframes, 1, false);
+                return;
+            }
+            CopyReplayFile(replaypath, tempPath);
         }
 
         if(gM_ReplayMenu[client] != null)
@@ -406,6 +417,73 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
             gM_ReplayMenu[client].Display(client, 20);
         }
     }
+}
+
+void MyReplayFloppySaved(bool saved, any value)
+{
+    DataPack dp = value;
+    dp.Reset();
+    int client      = GetClientFromSerial(dp.ReadCell());
+    int mode        = dp.ReadCell();
+    bool autowatch  = view_as<bool>(dp.ReadCell());
+    ArrayList cloned = dp.ReadCell();
+    ArrayList paths  = dp.ReadCell();
+    delete dp;
+    delete cloned;
+    delete paths;
+
+    if (!saved || client == 0 || !IsClientInGame(client))
+        return;
+
+    if (mode == 0)
+    {
+        SavePersonalReplay(client);
+
+        if (autowatch)
+        {
+            PersonalReplay replay;
+            GetPersonalReplay(replay, client);
+            StartPersonalReplay(client, replay.sAuth);
+        }
+    }
+    else
+    {
+        if (gM_ReplayMenu[client] != null)
+        {
+            gM_ReplayMenu[client].RemoveItem(1);
+            gM_ReplayMenu[client].InsertItem(1, "yes", "是");
+            gM_ReplayMenu[client].Display(client, 20);
+        }
+    }
+}
+
+void AsyncCopyReplay(int client, const char[] destPath, ArrayList frames,
+    int style, int track, float time, int preframes, int postframes, int mode, bool autowatch)
+{
+    ArrayList cloned = view_as<ArrayList>(CloneHandle(frames));
+    ArrayList paths  = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
+    paths.PushString(destPath);
+
+    char headerbuf[512];
+    float fZoneOffset[2];
+    int headersize = WriteReplayHeaderToBuffer(
+        headerbuf, style, track, time,
+        GetSteamAccountID(client),
+        preframes, postframes,
+        fZoneOffset,
+        cloned.Length,
+        1.0 / GetTickInterval(),
+        gS_Map
+    );
+
+    DataPack dp = new DataPack();
+    dp.WriteCell(GetClientSerial(client));
+    dp.WriteCell(mode);
+    dp.WriteCell(view_as<int>(autowatch));
+    dp.WriteCell(cloned);
+    dp.WriteCell(paths);
+
+    SRCWRFloppy_AsyncSaveReplay(MyReplayFloppySaved, dp, paths, headerbuf, headersize, cloned, cloned.Length);
 }
 
 bool CopyReplayFile(const char[] from, const char[] to)

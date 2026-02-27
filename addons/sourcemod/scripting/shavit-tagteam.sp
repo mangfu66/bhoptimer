@@ -57,9 +57,12 @@ int g_iLastTeamIndex[MAXPLAYERS + 1] = { -1, ... }; // [FIX] 缓存离队前的�
 int g_iNextTeamMember[MAXPLAYERS + 1];
 char g_cPlayerTeamName[MAXPLAYERS + 1][MAX_NAME_LENGTH];
 int g_iPendingPassId[MAXPLAYERS + 1]; // [FIX] 追踪待定的传送，用于防止重开后被强制传送
+bool g_bPendingFinishCleanup[MAXPLAYERS + 1]; // 完成者等待录像保存后再重置计时器
+Handle g_hFinishCleanupTimer[MAXPLAYERS + 1]; // 兜底 timer，防止 OnReplaySaved 未触发
 
 // 记录当前队伍的跑手历史 (用于保存到数据库)
-ArrayList g_aTeamRunHistory[MAX_TEAMS]; 
+ArrayList g_aTeamRunHistory[MAX_TEAMS];
+ArrayList g_aTeamRunAuthHistory[MAX_TEAMS]; // 对应每个跑手的 SteamAccountID
 
 // [NEW] 存储每次pass时的checkpoint数据，用于正确的undo
 cp_cache_t g_LastPassCheckpoint[MAX_TEAMS];
@@ -142,9 +145,10 @@ public void OnPluginStart()
 	AddCommandListener(Command_Say_Hook, "say");
 	AddCommandListener(Command_Say_Hook, "say_team");
 
-	for (int i = 0; i < MAX_TEAMS; i++) 
+	for (int i = 0; i < MAX_TEAMS; i++)
 	{
 		g_aTeamRunHistory[i] = new ArrayList(ByteCountToCells(68));
+		g_aTeamRunAuthHistory[i] = new ArrayList();
 		g_bHasLastPassCheckpoint[i] = false;
 	}
 
@@ -176,6 +180,7 @@ public void OnPluginEnd()
 		
 		// [FIX] Cleanup team run history ArrayLists
 		delete g_aTeamRunHistory[i];
+		delete g_aTeamRunAuthHistory[i];
 	}
 	
 	// [FIX] Cleanup player ArrayLists
@@ -202,7 +207,9 @@ public void OnClientConnected(int client)
 	g_bCreatingTeam[client] = false;
 	g_cPlayerTeamName[client][0] = '\0';
 	g_iPendingPassId[client] = 0;
-	
+	g_bPendingFinishCleanup[client] = false;
+	g_hFinishCleanupTimer[client] = null;
+
 	// [FIX] Bug #1: Initialize ArrayLists to prevent NULL crashes
 	delete g_aInvitedPlayers[client];
 	g_aInvitedPlayers[client] = new ArrayList();
@@ -523,8 +530,12 @@ public void Frame_AutoOpenMenu(int serial)
 // [NEW] 阻止单人开始计时
 public Action Shavit_OnStart(int client, int track)
 {
+	// [FIX] 完成者正在等待录像保存，阻止计时器重启但不调用 StopTimer（StopTimer 会取消 floppy 异步写入）
+	if (g_bPendingFinishCleanup[client])
+		return Plugin_Handled;
+
 	int style = Shavit_GetBhopStyle(client);
-	
+
 	// 如果是 TagTeam 样式
 	if (Shavit_GetStyleSettingBool(style, "tagteam"))
 	{
@@ -1041,12 +1052,9 @@ void RecordHistory(int teamIdx, int client)
 	int steamid = GetSteamAccountID(client);
 	char name[64];
 	GetClientName(client, name, sizeof(name));
-	
-	any[] data = new any[17]; 
-	data[0] = steamid;
-	for(int i=0; i<16; i++) data[1+i] = view_as<int>(name[i*4]); 
-	
+
 	g_aTeamRunHistory[teamIdx].PushString(name);
+	g_aTeamRunAuthHistory[teamIdx].Push(steamid);
 }
 
 public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, int strafes, float sync, int track, float oldtime, float perfs, float avgvel, float maxvel, int timestamp, bool isbestreplay, bool istoolong, ArrayList replaypaths, ArrayList frames, int preframes, int postframes, const char[] name)
@@ -1071,20 +1079,48 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
 		g_aTeamRunHistory[teamIdx].GetString(i, runnerName, sizeof(runnerName));
 		char escName[128];
 		gH_SQL.Escape(runnerName, escName, sizeof(escName));
-		
+
+		int runnerAuth = (i < g_aTeamRunAuthHistory[teamIdx].Length) ? g_aTeamRunAuthHistory[teamIdx].Get(i) : 0;
+
 		char query[1024];
-		Format(query, sizeof(query), 
+		Format(query, sizeof(query),
 			"INSERT INTO `tagteam_log` (map, style, time, date, segment_idx, auth, name, teamname) " ...
 			"VALUES ('%s', %d, %f, %d, %d, %d, '%s', '%s');",
-			escMap, style, time, timestamp, i, 0, escName, escTeamName
+			escMap, style, time, timestamp, i, runnerAuth, escName, escTeamName
 		);
 		SQL_TQuery(gH_SQL, SQL_Insert_Callback, query);
+	}
+
+	// [FIX] 录像已确认保存，现在安全地重置完成者的计时器
+	if (g_bPendingFinishCleanup[client])
+	{
+		g_bPendingFinishCleanup[client] = false;
+		delete g_hFinishCleanupTimer[client];
+		if (IsClientInGame(client))
+		{
+			Shavit_ChangeClientStyle(client, 0);
+			Shavit_RestartTimer(client, Track_Main);
+		}
 	}
 }
 
 public void SQL_Insert_Callback(Handle owner, Handle hndl, const char[] error, any data)
 {
 	if (hndl == INVALID_HANDLE) LogError("Insert TagTeam Log Failed: %s", error);
+}
+
+// 兜底：若 Shavit_OnReplaySaved 3 秒内未触发（录像未保存），仍重置完成者计时器
+public Action Timer_FinishCleanup(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client > 0 && IsClientInGame(client) && g_bPendingFinishCleanup[client])
+	{
+		g_bPendingFinishCleanup[client] = false;
+		g_hFinishCleanupTimer[client] = null;
+		Shavit_ChangeClientStyle(client, 0);
+		Shavit_RestartTimer(client, Track_Main);
+	}
+	return Plugin_Stop;
 }
 
 public Action Shavit_OnSave(int client, int idx)
@@ -1183,7 +1219,8 @@ void CreateTeam(int[] members, int memberCount, int style)
 		GetClientName(members[0], g_cTeamName[teamindex], sizeof(g_cTeamName[]));
 
 	g_aTeamRunHistory[teamindex].Clear();
-	RecordHistory(teamindex, members[0]); 
+	g_aTeamRunAuthHistory[teamindex].Clear();
+	RecordHistory(teamindex, members[0]);
 
 	// [FIX] 提前设置 g_iCurrentPlayer，防止后续 Shavit_ChangeClientStyle 触发 HUD 时读到 0
 	g_iCurrentPlayer[teamindex] = members[0];
@@ -1295,8 +1332,12 @@ public Action Command_Undo(int client, int args)
 	}
 	
 	// [FIX] Bug #5: Safe ArrayList access
-	if (g_aTeamRunHistory[teamidx].Length > 1) 
+	if (g_aTeamRunHistory[teamidx].Length > 1)
+	{
 		g_aTeamRunHistory[teamidx].Erase(g_aTeamRunHistory[teamidx].Length - 1);
+		if (g_aTeamRunAuthHistory[teamidx].Length > 1)
+			g_aTeamRunAuthHistory[teamidx].Erase(g_aTeamRunAuthHistory[teamidx].Length - 1);
+	}
 
 	int last = -1;
 	for(int i = 1; i <= MaxClients; i++)
@@ -1738,7 +1779,7 @@ void FinishInvite(int client) {
     CreateTeam(m, len+1, g_iInviteStyle[client]);
 }
 
-bool ExitTeam(int client, bool silent = false) {
+bool ExitTeam(int client, bool silent = false, bool skipTimerReset = false) {
 	// [FIX] Bug #6: Add client validation
 	if (!IsClientInGame(client)) return false;
 	
@@ -1792,8 +1833,11 @@ bool ExitTeam(int client, bool silent = false) {
 		}
 	}
 	g_iNextTeamMember[client] = -1;
-	Shavit_ChangeClientStyle(client, 0); 
-	Shavit_RestartTimer(client, Track_Main);
+	if (!skipTimerReset)
+	{
+		Shavit_ChangeClientStyle(client, 0);
+		Shavit_RestartTimer(client, Track_Main);
+	}
 	return true;
 }
 
@@ -1817,7 +1861,8 @@ public void Shavit_OnRestart(int client, int track)
 			g_nPassCount[teamIdx] = 0;
 			g_nUndoCount[teamIdx] = 0;
 			g_aTeamRunHistory[teamIdx].Clear();
-			RecordHistory(teamIdx, client); 
+			g_aTeamRunAuthHistory[teamIdx].Clear();
+			RecordHistory(teamIdx, client);
 			PrintToTeam(teamIdx, "跑手重置！接力次数已清零。");
 		}
 	}
@@ -1881,10 +1926,22 @@ public void Shavit_OnFinish_Post(int client, int style, float time, int jumps, i
 	{
 		if (IsClientInGame(i) && g_iTeamIndex[i] == teamidx)
 		{
-			ExitTeam(i, true); // silent exit
-			Shavit_ClearCheckpoints(i);
-			Shavit_StopTimer(i);
-			Shavit_RestartTimer(i, Track_Main);
+			if (i == client)
+			{
+				// 完成者：离队但跳过计时器重置，等录像保存后再清理
+				ExitTeam(i, true, true);
+				Shavit_ClearCheckpoints(i);
+				g_bPendingFinishCleanup[i] = true;
+				delete g_hFinishCleanupTimer[i];
+				g_hFinishCleanupTimer[i] = CreateTimer(3.0, Timer_FinishCleanup, GetClientUserId(i));
+			}
+			else
+			{
+				ExitTeam(i, true);
+				Shavit_ClearCheckpoints(i);
+				Shavit_StopTimer(i);
+				Shavit_RestartTimer(i, Track_Main);
+			}
 		}
 	}
 	

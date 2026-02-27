@@ -94,7 +94,7 @@ int gI_PlayerCompletion[MAXPLAYERS+1][STYLE_LIMIT][TRACKS_SIZE];
 // TagTeam WR cache
 bool g_bIsTagTeamWR[STYLE_LIMIT][TRACKS_SIZE];
 char g_cTagTeamName[STYLE_LIMIT][TRACKS_SIZE][64];
-char g_cTagTeamMembers[STYLE_LIMIT][TRACKS_SIZE][256];
+char g_cTagTeamMembers[STYLE_LIMIT][TRACKS_SIZE][512];
 
 // admin menu
 TopMenu gH_AdminMenu = null;
@@ -1958,9 +1958,8 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 			{
 				if (iCount == 1 && g_bIsTagTeamWR[style][track])
 				{
-					FormatEx(sDisplay, 128, "#%d - Team: %s\n     Runners: %s\n     %s (%d %T)", 
-						iCount, sName, g_cTagTeamMembers[style][track], 
-						sTime, jumps, "WRJumps", client);
+					FormatEx(sDisplay, 128, "#%d - %s - %s (%d %T)",
+						iCount, sName, sTime, jumps, "WRJumps", client);
 				}
 				else
 				{
@@ -1983,9 +1982,8 @@ public void SQL_WR_Callback(Database db, DBResultSet results, const char[] error
 			{
 				if (iCount == 1 && g_bIsTagTeamWR[style][track])
 				{
-					FormatEx(sDisplay, 512, "#%d - Team: %s\n     Runners: %s\n     %s (%d %T)",
-						iCount, sName, g_cTagTeamMembers[style][track], 
-						sTime, jumps, "WRJumps", client);
+					FormatEx(sDisplay, 512, "#%d - %s - %s (%d %T)",
+						iCount, sName, sTime, jumps, "WRJumps", client);
 				}
 				else
 				{
@@ -2511,9 +2509,22 @@ public int PersonalBestMenu_Handler(Menu menu, MenuAction action, int param1, in
 void OpenSubMenu(int client, int id)
 {
 	char sQuery[512];
-	FormatEx(sQuery, 512,
-		"SELECT u.name, p.time, p.jumps, p.style, u.auth, p.date, p.map, p.strafes, p.sync, p.perfs, p.points, p.track, p.completions FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE p.id = %d LIMIT 1;",
-		gS_MySQLPrefix, gS_MySQLPrefix, id);
+
+#if defined _shavit_tagteam_included
+	if (Shavit_GetStyleSettingBool(gA_WRCache[client].iLastStyle, "tagteam"))
+	{
+		// tagteam_times 列用别名对齐 playertimes 列顺序，callback 无需修改
+		FormatEx(sQuery, 512,
+			"SELECT team_name AS name, time, jumps, style, 0 AS auth, date, map, strafes, sync, perfs, 0 AS points, track, 0 AS completions FROM tagteam_times WHERE id = %d LIMIT 1;",
+			id);
+	}
+	else
+#endif
+	{
+		FormatEx(sQuery, 512,
+			"SELECT u.name, p.time, p.jumps, p.style, u.auth, p.date, p.map, p.strafes, p.sync, p.perfs, p.points, p.track, p.completions FROM %splayertimes p JOIN %susers u ON p.auth = u.auth WHERE p.id = %d LIMIT 1;",
+			gS_MySQLPrefix, gS_MySQLPrefix, id);
+	}
 
 	DataPack datapack = new DataPack();
 	datapack.WriteCell(GetClientSerial(client));
@@ -2618,18 +2629,21 @@ public void SQL_SubMenu_Callback(Database db, DBResultSet results, const char[] 
 		char sMenuItem[64];
 		char sInfo[32];
 
-		if(gB_Stats)
+		if(gB_Stats && iSteamID != 0)
 		{
 			FormatEx(sMenuItem, 64, "%T", "WRPlayerStats", client);
 			FormatEx(sInfo, 32, "0;%d", iSteamID);
 			hMenu.AddItem(sInfo, sMenuItem);
 		}
 
-		FormatEx(sMenuItem, 64, "%T", "OpenSteamProfile", client);
-		FormatEx(sInfo, 32, "2;%d", iSteamID);
-		hMenu.AddItem(sInfo, sMenuItem);
+		if(iSteamID != 0)
+		{
+			FormatEx(sMenuItem, 64, "%T", "OpenSteamProfile", client);
+			FormatEx(sInfo, 32, "2;%d", iSteamID);
+			hMenu.AddItem(sInfo, sMenuItem);
+		}
 
-		if(CheckCommandAccess(client, "sm_delete", ADMFLAG_RCON))
+		if(CheckCommandAccess(client, "sm_delete", ADMFLAG_RCON) && iSteamID != 0)
 		{
 			FormatEx(sMenuItem, 64, "%T", "WRDeleteRecord", client);
 			FormatEx(sInfo, 32, "1;%d", id);
@@ -2638,7 +2652,30 @@ public void SQL_SubMenu_Callback(Database db, DBResultSet results, const char[] 
 
 		GetTrackName(client, results.FetchInt(11), sTrack, 32);
 
-		Shavit_PrintSteamIDOnce(client, iSteamID, sName);
+		if(iSteamID != 0)
+			Shavit_PrintSteamIDOnce(client, iSteamID, sName);
+#if defined _shavit_tagteam_included
+		else if(Shavit_GetStyleSettingBool(gA_WRCache[client].iLastStyle, "tagteam"))
+		{
+			// 加分隔符，设标题，把 menu handle 传给第二阶段查询
+			hMenu.AddItem("-1", "── 队员 ──", ITEMDRAW_DISABLED);
+
+			FormatEx(sFormattedTitle, 256, "Team: %s\n--- %s: [%s]", sName, sMap, sTrack);
+			hMenu.SetTitle(sFormattedTitle);
+			hMenu.ExitBackButton = true;
+
+			char sMembersQuery[512];
+			FormatEx(sMembersQuery, sizeof(sMembersQuery),
+				"SELECT l.name, l.auth FROM tagteam_log l JOIN tagteam_times t ON t.map = l.map AND t.style = l.style AND t.date = l.date AND t.team_name = l.teamname WHERE t.id = %d ORDER BY l.segment_idx ASC;",
+				id);
+			DataPack dp = new DataPack();
+			dp.WriteCell(GetClientSerial(client));
+			dp.WriteCell(id);
+			dp.WriteCell(view_as<int>(hMenu));
+			QueryLog(gH_SQL, SQL_TagTeamSubMenu_Callback, sMembersQuery, dp, DBPrio_High);
+			return; // 不走末尾的 SetTitle + Display，由第二阶段负责显示
+		}
+#endif
 	}
 	else
 	{
@@ -2649,7 +2686,10 @@ public void SQL_SubMenu_Callback(Database db, DBResultSet results, const char[] 
 
 	if(strlen(sName) > 0)
 	{
-		FormatEx(sFormattedTitle, 256, "%s [U:1:%u]\n--- %s: [%s]", sName, iSteamID, sMap, sTrack);
+		if(iSteamID != 0)
+			FormatEx(sFormattedTitle, 256, "%s [U:1:%u]\n--- %s: [%s]", sName, iSteamID, sMap, sTrack);
+		else
+			FormatEx(sFormattedTitle, 256, "%s\n--- %s: [%s]", sName, sMap, sTrack);
 	}
 	else
 	{
@@ -2660,6 +2700,51 @@ public void SQL_SubMenu_Callback(Database db, DBResultSet results, const char[] 
 	hMenu.ExitBackButton = true;
 	hMenu.Display(client, MENU_TIME_FOREVER);
 }
+
+#if defined _shavit_tagteam_included
+public void SQL_TagTeamSubMenu_Callback(Database db, DBResultSet results, const char[] error, DataPack data)
+{
+	data.Reset();
+	int client = GetClientFromSerial(data.ReadCell());
+	int id     = data.ReadCell();
+	Menu hMenu = view_as<Menu>(data.ReadCell());
+	delete data;
+
+	if(client == 0 || !IsClientInGame(client))
+	{
+		delete hMenu;
+		return;
+	}
+
+	if(results != null)
+	{
+		ArrayList printed = new ArrayList(ByteCountToCells(MAX_NAME_LENGTH));
+		while(results.FetchRow())
+		{
+			char sMemberName[MAX_NAME_LENGTH];
+			results.FetchString(0, sMemberName, sizeof(sMemberName));
+			if(printed.FindString(sMemberName) != -1)
+				continue;
+			printed.PushString(sMemberName);
+
+			char sItem[MAX_NAME_LENGTH + 10];
+			FormatEx(sItem, sizeof(sItem), "Player: %s", sMemberName);
+			hMenu.AddItem("-1", sItem, ITEMDRAW_DISABLED);
+		}
+		delete printed;
+	}
+
+	if(CheckCommandAccess(client, "sm_delete", ADMFLAG_RCON))
+	{
+		char sMenuItem[64], sInfo[32];
+		FormatEx(sMenuItem, 64, "%T", "WRDeleteRecord", client);
+		FormatEx(sInfo, 32, "1;%d", id);
+		hMenu.AddItem(sInfo, sMenuItem);
+	}
+
+	hMenu.Display(client, MENU_TIME_FOREVER);
+}
+#endif
 
 public int SubMenu_Handler(Menu menu, MenuAction action, int param1, int param2)
 {
