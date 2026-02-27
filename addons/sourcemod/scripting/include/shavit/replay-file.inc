@@ -136,6 +136,11 @@ stock bool ReadReplayFrames(File file, replay_header_t header, frame_cache_t cac
 
 	delete cache.aFrames;
 	int iTotalSize = header.iFrameCount + header.iPreFrames + header.iPostFrames;
+	// 合理性检查：防止损坏的 header 导致超大循环超时（128tick * 3h ≈ 1.4M 帧）
+	if (iTotalSize <= 0 || iTotalSize > 2000000)
+	{
+		return false;
+	}
 	cache.aFrames = new ArrayList(total_cells, iTotalSize);
 
 	if (!header.sReplayFormat[0]) // old replay format. no header.
